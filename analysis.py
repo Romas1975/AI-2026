@@ -16,9 +16,43 @@ plt.plot(data["Close"])
 plt.title("SPY Closing Price (Stooq)")
 plt.show()
 
-Open
-High
-Low
-Close
-Volume
+
+
+import numpy as np
+
+# EMA
+data["EMA12"] = data["Close"].ewm(span=12, adjust=False).mean()
+data["EMA26"] = data["Close"].ewm(span=26, adjust=False).mean()
+
+# MACD
+data["MACD"] = data["EMA12"] - data["EMA26"]
+data["Signal"] = data["MACD"].ewm(span=9, adjust=False).mean()
+data["Histogram"] = data["MACD"] - data["Signal"]
+
+plt.figure()
+plt.plot(data["MACD"], label="MACD")
+plt.plot(data["Signal"], label="Signal")
+plt.bar(data.index, data["Histogram"])
+plt.legend()
+plt.title("MACD - SPY (Stooq)")
+plt.show()
+
+data["Buy"] = np.where(
+    (data["MACD"] > data["Signal"]) &
+    (data["MACD"].shift(1) <= data["Signal"].shift(1)),
+    1, 0
+)
+
+data["Sell"] = np.where(
+    (data["MACD"] < data["Signal"]) &
+    (data["MACD"].shift(1) >= data["Signal"].shift(1)),
+    1, 0
+)
+
+print("BUY signals:")
+print(data[data["Buy"] == 1].tail())
+
+print("SELL signals:")
+print(data[data["Sell"] == 1].tail())
+
 
