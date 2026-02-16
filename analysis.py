@@ -22,5 +22,17 @@ plt.plot(data["MA50"])
 plt.plot(data["MA200"])
 plt.title("SPY su MA50 ir MA200")
 plt.show()
+import yfinance as yf
+
+data = yf.download("SPY", start="2015-01-01")
+
+print("Data shape:", data.shape)
+print(data.tail())
+import yfinance as yf
+
+data = yf.download("SPY", start="2015-01-01", auto_adjust=True)
+
+print("Data shape:", data.shape)
+print(data.tail())
 
 
