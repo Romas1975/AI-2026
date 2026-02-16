@@ -46,5 +46,15 @@ import pandas as pd
 data = pd.read_csv("spy_data.csv", index_col=0, parse_dates=True)
 data = yf.download("SPY", period="5y", auto_adjust=True)
 print(data.tail())
+import yfinance as yf
+
+spy = yf.Ticker("SPY")
+data = spy.history(period="5y")
+
+print(data.tail())
+spy = yf.Ticker("^GSPC")
+data = spy.history(period="5y")
+
+print(data.tail())
 
 
