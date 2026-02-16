@@ -11,3 +11,4 @@ plt.plot(data["Close"])
 plt.title("SPY Closing Price")
 plt.show()
 
+
