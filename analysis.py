@@ -41,5 +41,10 @@ data = yf.download("SPY", period="10y", auto_adjust=True)
 data.to_csv("spy_data.csv")
 
 print("Saved locally.")
+import pandas as pd
+
+data = pd.read_csv("spy_data.csv", index_col=0, parse_dates=True)
+data = yf.download("SPY", period="5y", auto_adjust=True)
+print(data.tail())
 
 
