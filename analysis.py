@@ -34,5 +34,12 @@ data = yf.download("SPY", start="2015-01-01", auto_adjust=True)
 
 print("Data shape:", data.shape)
 print(data.tail())
+import yfinance as yf
+
+data = yf.download("SPY", period="10y", auto_adjust=True)
+
+data.to_csv("spy_data.csv")
+
+print("Saved locally.")
 
 
