@@ -117,8 +117,15 @@ print("Buy & Hold MDD:", max_drawdown(data["BuyHold"]))
 print("MACD MDD:", max_drawdown(data["MACD_Strategy"]))
 print("MACD + MA200 MDD:", max_drawdown(data["Filtered_Equity"]))
 
+data["Position"] = data["Position"].replace(to_replace=0, method="ffill")
 
+data["Position"] = np.nan
 
+data.loc[data["Buy"] == 1, "Position"] = 1
+data.loc[data["Sell"] == 1, "Position"] = 0
+
+data["Position"] = data["Position"].ffill()
+data["Position"] = data["Position"].fillna(0)
 
 
 
