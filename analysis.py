@@ -127,6 +127,36 @@ data.loc[data["Sell"] == 1, "Position"] = 0
 data["Position"] = data["Position"].ffill()
 data["Position"] = data["Position"].fillna(0)
 
+# RSI
+delta = data["Close"].diff()
+gain = delta.clip(lower=0)
+loss = -delta.clip(upper=0)
+
+avg_gain = gain.rolling(14).mean()
+avg_loss = loss.rolling(14).mean()
+
+rs = avg_gain / avg_loss
+data["RSI"] = 100 - (100 / (1 + rs))
+
+data["RSI_Position"] = np.where(
+    (data["MACD"] > data["Signal"]) &
+    (data["RSI"] < 70),
+    1,
+    0
+)
+
+data["RSI_Position"] = data["RSI_Position"].ffill()
+data["RSI_Position"] = data["RSI_Position"].fillna(0)
+
+data["RSI_Strategy_Return"] = data["RSI_Position"].shift(1) * data["Return"]
+data["RSI_Equity"] = (1 + data["RSI_Strategy_Return"]).cumprod()
+
+plt.plot(data["RSI_Equity"], label="MACD + RSI")
+
+data["Position"] = data["Position"].ffill().fillna(0)
+
+
+
 
 
 
