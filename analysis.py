@@ -55,4 +55,18 @@ print(data[data["Buy"] == 1].tail())
 print("SELL signals:")
 print(data[data["Sell"] == 1].tail())
 
+# Dienos grąža
+data["Return"] = data["Close"].pct_change()
+
+data["Position"] = 0
+
+data.loc[data["Buy"] == 1, "Position"] = 1
+data.loc[data["Sell"] == 1, "Position"] = 0
+
+# Forward fill kad laikytume poziciją iki SELL
+data["Position"] = data["Position"].replace(to_replace=0, method="ffill")
+data["Position"] = data["Position"].fillna(0)
+
+
+
 
