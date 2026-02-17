@@ -108,6 +108,16 @@ plt.legend()
 plt.title("Strategy Comparison - SPY")
 plt.show()
 
+def max_drawdown(equity_curve):
+    rolling_max = equity_curve.cummax()
+    drawdown = equity_curve / rolling_max - 1
+    return drawdown.min()
+
+print("Buy & Hold MDD:", max_drawdown(data["BuyHold"]))
+print("MACD MDD:", max_drawdown(data["MACD_Strategy"]))
+print("MACD + MA200 MDD:", max_drawdown(data["Filtered_Equity"]))
+
+
 
 
 
