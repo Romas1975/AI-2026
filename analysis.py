@@ -67,6 +67,49 @@ data.loc[data["Sell"] == 1, "Position"] = 0
 data["Position"] = data["Position"].replace(to_replace=0, method="ffill")
 data["Position"] = data["Position"].fillna(0)
 
+data["Strategy_Return"] = data["Position"].shift(1) * data["Return"]
+
+data["BuyHold"] = (1 + data["Return"]).cumprod()
+data["MACD_Strategy"] = (1 + data["Strategy_Return"]).cumprod()
+
+import matplotlib.pyplot as plt
+
+plt.figure()
+plt.plot(data["BuyHold"], label="Buy & Hold")
+plt.plot(data["MACD_Strategy"], label="MACD Strategy")
+
+plt.legend()
+plt.title("MACD vs Buy & Hold - SPY")
+plt.show()
+
+# MA200 trend filtras
+data["MA200"] = data["Close"].rolling(200).mean()
+
+# Nauja pozicija su filtru
+data["Filtered_Position"] = np.where(
+    (data["MACD"] > data["Signal"]) &
+    (data["Close"] > data["MA200"]),
+    1,
+    0
+)
+
+data["Filtered_Position"] = data["Filtered_Position"].replace(to_replace=0, method="ffill")
+data["Filtered_Position"] = data["Filtered_Position"].fillna(0)
+
+data["Filtered_Strategy"] = data["Filtered_Position"].shift(1) * data["Return"]
+data["Filtered_Equity"] = (1 + data["Filtered_Strategy"]).cumprod()
+
+plt.figure()
+plt.plot(data["BuyHold"], label="Buy & Hold")
+plt.plot(data["MACD_Strategy"], label="MACD")
+plt.plot(data["Filtered_Equity"], label="MACD + MA200 Filter")
+
+plt.legend()
+plt.title("Strategy Comparison - SPY")
+plt.show()
+
+
+
 
 
 
