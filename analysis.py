@@ -7,3 +7,9 @@ import matplotlib.pyplot as plt
 import sklearn
 
 exit()
+
+import tensorflow as tf
+print(tf.__version__)
+
+
+
