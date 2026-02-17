@@ -1,162 +1,150 @@
 import pandas as pd
-import matplotlib.pyplot as plt
-
-url = "https://stooq.com/q/d/l/?s=spy.us&i=d"
-
-data = pd.read_csv(url)
-
-data["Date"] = pd.to_datetime(data["Date"])
-data = data.sort_values("Date")
-data.set_index("Date", inplace=True)
-
-print(data.tail())
-
-plt.figure()
-plt.plot(data["Close"])
-plt.title("SPY Closing Price (Stooq)")
-plt.show()
-
-
-
 import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
 
-# EMA
-data["EMA12"] = data["Close"].ewm(span=12, adjust=False).mean()
-data["EMA26"] = data["Close"].ewm(span=26, adjust=False).mean()
+# =========================
+# LOAD DATA
+# =========================
+def load_data():
+    url = "https://stooq.com/q/d/l/?s=spy.us&i=d"
+    df = pd.read_csv(url)
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.sort_values("Date")
+    df.set_index("Date", inplace=True)
+    return df
 
-# MACD
-data["MACD"] = data["EMA12"] - data["EMA26"]
-data["Signal"] = data["MACD"].ewm(span=9, adjust=False).mean()
-data["Histogram"] = data["MACD"] - data["Signal"]
 
-plt.figure()
-plt.plot(data["MACD"], label="MACD")
-plt.plot(data["Signal"], label="Signal")
-plt.bar(data.index, data["Histogram"])
-plt.legend()
-plt.title("MACD - SPY (Stooq)")
-plt.show()
+# =========================
+# ADD INDICATORS
+# =========================
+def add_indicators(df, fast=12, slow=26, signal=9):
 
-data["Buy"] = np.where(
-    (data["MACD"] > data["Signal"]) &
-    (data["MACD"].shift(1) <= data["Signal"].shift(1)),
-    1, 0
-)
+    df["EMA_fast"] = df["Close"].ewm(span=fast, adjust=False).mean()
+    df["EMA_slow"] = df["Close"].ewm(span=slow, adjust=False).mean()
 
-data["Sell"] = np.where(
-    (data["MACD"] < data["Signal"]) &
-    (data["MACD"].shift(1) >= data["Signal"].shift(1)),
-    1, 0
-)
+    df["MACD"] = df["EMA_fast"] - df["EMA_slow"]
+    df["Signal"] = df["MACD"].ewm(span=signal, adjust=False).mean()
 
-print("BUY signals:")
-print(data[data["Buy"] == 1].tail())
+    # RSI
+    delta = df["Close"].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
 
-print("SELL signals:")
-print(data[data["Sell"] == 1].tail())
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
 
-# Dienos grąža
-data["Return"] = data["Close"].pct_change()
+    rs = avg_gain / avg_loss
+    df["RSI"] = 100 - (100 / (1 + rs))
 
-data["Position"] = 0
+    df["Return"] = df["Close"].pct_change()
 
-data.loc[data["Buy"] == 1, "Position"] = 1
-data.loc[data["Sell"] == 1, "Position"] = 0
+    return df
 
-# Forward fill kad laikytume poziciją iki SELL
-data["Position"] = data["Position"].replace(to_replace=0, method="ffill")
-data["Position"] = data["Position"].fillna(0)
+def run_macd_strategy(df, commission=0.001):
 
-data["Strategy_Return"] = data["Position"].shift(1) * data["Return"]
+    df["Position"] = np.where(
+        (df["MACD"] > df["Signal"]),
+        1,
+        0
+    )
 
-data["BuyHold"] = (1 + data["Return"]).cumprod()
-data["MACD_Strategy"] = (1 + data["Strategy_Return"]).cumprod()
+    df["Position"] = df["Position"].shift(1).fillna(0)
 
-import matplotlib.pyplot as plt
+    df["Strategy_Return"] = df["Position"] * df["Return"]
 
-plt.figure()
-plt.plot(data["BuyHold"], label="Buy & Hold")
-plt.plot(data["MACD_Strategy"], label="MACD Strategy")
+    # Commission
+    df["Trade"] = df["Position"].diff().abs()
+    df["Cost"] = df["Trade"] * commission
 
-plt.legend()
-plt.title("MACD vs Buy & Hold - SPY")
-plt.show()
+    df["Net_Return"] = df["Strategy_Return"] - df["Cost"]
+    df["Equity"] = (1 + df["Net_Return"]).cumprod()
 
-# MA200 trend filtras
-data["MA200"] = data["Close"].rolling(200).mean()
+    return df
 
-# Nauja pozicija su filtru
-data["Filtered_Position"] = np.where(
-    (data["MACD"] > data["Signal"]) &
-    (data["Close"] > data["MA200"]),
-    1,
-    0
-)
-
-data["Filtered_Position"] = data["Filtered_Position"].replace(to_replace=0, method="ffill")
-data["Filtered_Position"] = data["Filtered_Position"].fillna(0)
-
-data["Filtered_Strategy"] = data["Filtered_Position"].shift(1) * data["Return"]
-data["Filtered_Equity"] = (1 + data["Filtered_Strategy"]).cumprod()
-
-plt.figure()
-plt.plot(data["BuyHold"], label="Buy & Hold")
-plt.plot(data["MACD_Strategy"], label="MACD")
-plt.plot(data["Filtered_Equity"], label="MACD + MA200 Filter")
-
-plt.legend()
-plt.title("Strategy Comparison - SPY")
-plt.show()
-
-def max_drawdown(equity_curve):
-    rolling_max = equity_curve.cummax()
-    drawdown = equity_curve / rolling_max - 1
+def max_drawdown(equity):
+    rolling_max = equity.cummax()
+    drawdown = equity / rolling_max - 1
     return drawdown.min()
 
-print("Buy & Hold MDD:", max_drawdown(data["BuyHold"]))
-print("MACD MDD:", max_drawdown(data["MACD_Strategy"]))
-print("MACD + MA200 MDD:", max_drawdown(data["Filtered_Equity"]))
+def optimize_macd(df):
 
-data["Position"] = data["Position"].replace(to_replace=0, method="ffill")
+    best_sharpe = -999
+    best_params = None
 
-data["Position"] = np.nan
+    for fast in range(8, 20, 2):
+        for slow in range(20, 40, 2):
+            for signal in range(5, 15, 2):
 
-data.loc[data["Buy"] == 1, "Position"] = 1
-data.loc[data["Sell"] == 1, "Position"] = 0
+                temp = df.copy()
+                temp = add_indicators(temp, fast, slow, signal)
+                temp = run_macd_strategy(temp)
 
-data["Position"] = data["Position"].ffill()
-data["Position"] = data["Position"].fillna(0)
+                sharpe = temp["Net_Return"].mean() / temp["Net_Return"].std()
 
-# RSI
-delta = data["Close"].diff()
-gain = delta.clip(lower=0)
-loss = -delta.clip(upper=0)
+                if sharpe > best_sharpe:
+                    best_sharpe = sharpe
+                    best_params = (fast, slow, signal)
 
-avg_gain = gain.rolling(14).mean()
-avg_loss = loss.rolling(14).mean()
+    return best_params, best_sharpe
 
-rs = avg_gain / avg_loss
-data["RSI"] = 100 - (100 / (1 + rs))
+def walk_forward_test(df):
 
-data["RSI_Position"] = np.where(
-    (data["MACD"] > data["Signal"]) &
-    (data["RSI"] < 70),
-    1,
-    0
-)
+    split_date = "2015-01-01"
 
-data["RSI_Position"] = data["RSI_Position"].ffill()
-data["RSI_Position"] = data["RSI_Position"].fillna(0)
+    train = df[df.index < split_date]
+    test = df[df.index >= split_date]
 
-data["RSI_Strategy_Return"] = data["RSI_Position"].shift(1) * data["Return"]
-data["RSI_Equity"] = (1 + data["RSI_Strategy_Return"]).cumprod()
+    best_params, _ = optimize_macd(train)
 
-plt.plot(data["RSI_Equity"], label="MACD + RSI")
+    test = add_indicators(test.copy(), *best_params)
+    test = run_macd_strategy(test)
 
-data["Position"] = data["Position"].ffill().fillna(0)
+    return test, best_params
+
+def ai_filter(df):
+
+    df["Future_Return"] = df["Close"].shift(-5) / df["Close"] - 1
+    df["Target"] = (df["Future_Return"] > 0).astype(int)
+
+    features = df[["MACD", "RSI"]].dropna()
+    target = df.loc[features.index, "Target"]
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        features, target, test_size=0.3, shuffle=False
+    )
+
+    model = RandomForestClassifier(n_estimators=100)
+    model.fit(X_train, y_train)
+
+    df["AI_Prediction"] = model.predict(features)
+
+    df["AI_Position"] = df["Position"] * df["AI_Prediction"]
+
+    df["AI_Return"] = df["AI_Position"].shift(1) * df["Return"]
+    df["AI_Equity"] = (1 + df["AI_Return"]).cumprod()
+
+    return df
+
+def main():
+
+    df = load_data()
+
+    df = add_indicators(df)
+    df = run_macd_strategy(df)
+
+    print("MACD MDD:", max_drawdown(df["Equity"]))
+
+    wf_test, params = walk_forward_test(df)
+    print("Best params:", params)
+
+    df = ai_filter(df)
+
+    print("AI MDD:", max_drawdown(df["AI_Equity"]))
 
 
-
+if __name__ == "__main__":
+    main()
 
 
 
