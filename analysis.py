@@ -1,63 +1,32 @@
 import pandas as pd
-import numpy as np
-import yfinance as yf
+import matplotlib.pyplot as plt
 
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+# --- 1. Sukuriame spy_data (arba įkelk iš CSV) ---
+data = {
+    'Close': [669.42, 674.48, 680.59, 684.83, 687.96, 690.38, 690.31, 687.85, 687.01, 681.92],
+    'AI_signal': [1, 0, 1, 1, 0, 0, 1, 1, 1, 0],
+    'Cumulative_market': [1.538, 1.550, 1.564, 1.573, 1.581, 1.586, 1.586, 1.580, 1.578, 1.567],
+    'Cumulative_strategy': [1.216, 1.225, 1.225, 1.233, 1.239, 1.239, 1.239, 1.234, 1.233, 1.224]
+}
+dates = pd.date_range(start='2025-12-17', periods=10, freq='B')  # darbo dienos
+spy_data = pd.DataFrame(data, index=dates)
 
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Input
+# --- 2. Atvaizduojame grafikus ---
+plt.figure(figsize=(12,6))
+plt.plot(spy_data.index, spy_data['Cumulative_market'], label='Buy & Hold', marker='o')
+plt.plot(spy_data.index, spy_data['Cumulative_strategy'], label='AI Strategy', marker='x')
 
-data = yf.download("SPY", start="2015-01-01")
+# --- 3. Pažymime missed opportunities ---
+# jei AI signalas buvo 0, bet rinka augo daugiau nei X%, pažymime
+threshold = 0.005  # 0.5% per dieną
+missed = (spy_data['AI_signal'] == 0) & (spy_data['Close'].pct_change().shift(-1) > threshold)
+plt.scatter(spy_data.index[missed], spy_data['Cumulative_market'][missed],
+            color='red', label='Missed Opportunities', s=100, marker='^')
 
-# MACD
-data["EMA12"] = data["Close"].ewm(span=12).mean()
-data["EMA26"] = data["Close"].ewm(span=26).mean()
-data["MACD"] = data["EMA12"] - data["EMA26"]
-data["Signal"] = data["MACD"].ewm(span=9).mean()
-
-# RSI
-delta = data["Close"].diff()
-gain = delta.clip(lower=0)
-loss = -delta.clip(upper=0)
-
-avg_gain = gain.rolling(14).mean()
-avg_loss = loss.rolling(14).mean()
-
-rs = avg_gain / avg_loss
-data["RSI"] = 100 - (100 / (1 + rs))
-
-data["Target"] = (data["Close"].shift(-1) > data["Close"]).astype(int)
-
-data.dropna(inplace=True)
-
-features = data[["MACD", "Signal", "RSI"]]
-target = data["Target"]
-
-scaler = StandardScaler()
-features_scaled = scaler.fit_transform(features)
-
-X_train, X_test, y_train, y_test = train_test_split(
-    features_scaled,
-    target,
-    test_size=0.2,
-    shuffle=False
-)
-
-model = Sequential([
-    Input(shape=(X_train.shape[1],)),
-    Dense(64, activation="relu"),
-    Dense(32, activation="relu"),
-    Dense(1, activation="sigmoid")
-])
-
-model.compile(
-    optimizer="adam",
-    loss="binary_crossentropy",
-    metrics=["accuracy"]
-)
-
-model.fit(X_train, y_train, epochs=20, batch_size=32)
-
-
+plt.title('AI Strategy vs Buy & Hold')
+plt.xlabel('Date')
+plt.ylabel('Cumulative Returns')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
