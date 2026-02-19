@@ -5,34 +5,31 @@ import pandas as pd
 import numpy as np
 
 # -----------------------------
-# 1️⃣ Dummy data (vietoje šių įkelk savo spy_data)
+# 1️⃣ Dummy data (įkelk savo spy_data)
 # -----------------------------
-dates = pd.date_range(start='2024-01-01', periods=500, freq='B')
+dates = pd.date_range(start='2024-01-01', periods=200, freq='B')
 np.random.seed(42)
 spy_data = pd.DataFrame({
-    'Close': np.cumsum(np.random.randn(500)) + 100,
-    'AI_signal': np.random.randint(0,2,500)
+    'Close': np.cumsum(np.random.randn(200)) + 100,
+    'AI_signal': np.random.randint(0,2,200)
 }, index=dates)
 
-# Returns & cumulative
+# --- Returns & Cumulative ---
 spy_data['Market_returns'] = spy_data['Close'].pct_change()
 spy_data['Cumulative_market'] = (1 + spy_data['Market_returns']).cumprod()
 spy_data['Strategy_returns'] = spy_data['Market_returns'] * spy_data['AI_signal']
 spy_data['Cumulative_strategy'] = (1 + spy_data['Strategy_returns']).cumprod()
 
-# Drawdowns
+# --- Drawdowns ---
 spy_data['Drawdown_market'] = spy_data['Cumulative_market'] / spy_data['Cumulative_market'].cummax() - 1
 spy_data['Drawdown_strategy'] = spy_data['Cumulative_strategy'] / spy_data['Cumulative_strategy'].cummax() - 1
 
-# -----------------------------
-# Helper functions
-# -----------------------------
+# --- Helper metrics ---
 def sharpe_ratio(returns):
     return np.sqrt(252) * returns.mean() / returns.std()
 
 def max_drawdown(cumulative):
-    roll_max = cumulative.cummax()
-    return (cumulative / roll_max - 1).min()
+    return (cumulative / cumulative.cummax() - 1).min()
 
 # -----------------------------
 # 2️⃣ Dash app
@@ -96,7 +93,7 @@ def update_dashboard(start_date, end_date):
     fig_dd.add_trace(go.Scatter(x=df.index, y=df['Drawdown_strategy'], name='Strategy Drawdown', line=dict(color='green')))
     fig_dd.update_layout(title='Drawdowns', xaxis_title='Date', yaxis_title='Drawdown')
 
-    # --- Rolling Metrics (Sharpe & Max Drawdown) ---
+    # --- Rolling Metrics ---
     window = 20
     rolling_sharpe_market = df['Market_returns'].rolling(window).mean() / df['Market_returns'].rolling(window).std() * np.sqrt(252)
     rolling_sharpe_strategy = df['Strategy_returns'].rolling(window).mean() / df['Strategy_returns'].rolling(window).std() * np.sqrt(252)
@@ -110,25 +107,27 @@ def update_dashboard(start_date, end_date):
     fig_rolling.add_trace(go.Scatter(x=df.index, y=rolling_dd_strategy, name='Strategy Rolling DD', line=dict(color='orange', dash='dot')))
     fig_rolling.update_layout(title='Rolling Sharpe & Max Drawdown', xaxis_title='Date')
 
-    # --- Heatmap: returns per weekday ---
+    # --- Heatmap: average returns per weekday ---
     df['Weekday'] = df.index.day_name()
     heatmap_data = df.pivot_table(index='Weekday', values=['Market_returns','Strategy_returns'], aggfunc=np.mean)
     fig_heatmap = go.Figure()
     fig_heatmap.add_trace(go.Heatmap(
-        z=heatmap_data['Market_returns'].values,
+        z=[heatmap_data['Market_returns'].values],
         x=heatmap_data.index,
         y=['Buy & Hold'],
-        colorscale='Blues', showscale=True, name='Market'
+        colorscale='Blues',
+        showscale=True
     ))
     fig_heatmap.add_trace(go.Heatmap(
-        z=heatmap_data['Strategy_returns'].values,
+        z=[heatmap_data['Strategy_returns'].values],
         x=heatmap_data.index,
         y=['AI Strategy'],
-        colorscale='Greens', showscale=True, name='Strategy'
+        colorscale='Greens',
+        showscale=True
     ))
     fig_heatmap.update_layout(title='Average Daily Returns by Weekday', yaxis_title='Strategy')
 
-    # --- Metrics panel ---
+    # --- Metrics Panel ---
     metrics_text = [
         html.P(f"Market Sharpe: {round(sharpe_ratio(df['Market_returns'].dropna()),3)}"),
         html.P(f"Strategy Sharpe: {round(sharpe_ratio(df['Strategy_returns'].dropna()),3)}"),
