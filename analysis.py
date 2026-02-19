@@ -1,56 +1,91 @@
+# ================================
+# AI-2026 Professional Backtest Framework
+# ================================
+
+import yfinance as yf
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 
-# --- 1. Sukuriame spy_data (arba įkelk iš CSV) ---
-data = {
-    'Close': [669.42, 674.48, 680.59, 684.83, 687.96, 690.38, 690.31, 687.85, 687.01, 681.92],
-    'AI_signal': [1, 0, 1, 1, 0, 0, 1, 1, 1, 0],
-    'Cumulative_market': [1.538, 1.550, 1.564, 1.573, 1.581, 1.586, 1.586, 1.580, 1.578, 1.567],
-    'Cumulative_strategy': [1.216, 1.225, 1.225, 1.233, 1.239, 1.239, 1.239, 1.234, 1.233, 1.224]
-}
-dates = pd.date_range(start='2025-12-17', periods=10, freq='B')  # darbo dienos
-spy_data = pd.DataFrame(data, index=dates)
+# ------------------------------
+# 1️⃣ Load data
+# ------------------------------
+def get_data(ticker='SPY', start='2024-01-01', end=None):
+    df = yf.download(ticker, start=start, end=end)
+    df = df[['Close']]
+    df['Returns'] = df['Close'].pct_change()
+    return df
 
-# --- 2. Atvaizduojame grafikus ---
-plt.figure(figsize=(12,6))
-plt.plot(spy_data.index, spy_data['Cumulative_market'], label='Buy & Hold', marker='o')
-plt.plot(spy_data.index, spy_data['Cumulative_strategy'], label='AI Strategy', marker='x')
+# ------------------------------
+# 2️⃣ Generate dummy AI signals
+# ------------------------------
+def generate_signals(df):
+    # Dummy AI: long if yesterday return > 0, else flat
+    df['AI_signal'] = (df['Returns'].shift(1) > 0).astype(int)
+    return df
 
-# --- 3. Pažymime missed opportunities ---
-# jei AI signalas buvo 0, bet rinka augo daugiau nei X%, pažymime
-threshold = 0.005  # 0.5% per dieną
-missed = (spy_data['AI_signal'] == 0) & (spy_data['Close'].pct_change().shift(-1) > threshold)
-plt.scatter(spy_data.index[missed], spy_data['Cumulative_market'][missed],
-            color='red', label='Missed Opportunities', s=100, marker='^')
+# ------------------------------
+# 3️⃣ Strategy / Backtest
+# ------------------------------
+def apply_strategy(df):
+    df['Strategy_returns'] = df['AI_signal'] * df['Returns']
+    df['Cumulative_market'] = (1 + df['Returns']).cumprod()
+    df['Cumulative_strategy'] = (1 + df['Strategy_returns']).cumprod()
+    return df
 
-plt.title('AI Strategy vs Buy & Hold')
-plt.xlabel('Date')
-plt.ylabel('Cumulative Returns')
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-plt.show()
-
-import numpy as np
-
-# Sharpe ratio
+# ------------------------------
+# 4️⃣ Performance metrics
+# ------------------------------
 def sharpe_ratio(returns):
     return np.sqrt(252) * returns.mean() / returns.std()
 
-market_sharpe = sharpe_ratio(spy_data['Market_returns'].dropna())
-strategy_sharpe = sharpe_ratio(spy_data['Strategy_returns'].dropna())
-
-# Max drawdown
 def max_drawdown(cumulative):
     roll_max = cumulative.cummax()
     drawdown = cumulative / roll_max - 1
     return drawdown.min()
 
-market_dd = max_drawdown(spy_data['Cumulative_market'])
-strategy_dd = max_drawdown(spy_data['Cumulative_strategy'])
+def analytics(df):
+    metrics = {}
+    metrics['Market Sharpe'] = round(sharpe_ratio(df['Returns'].dropna()), 3)
+    metrics['Strategy Sharpe'] = round(sharpe_ratio(df['Strategy_returns'].dropna()), 3)
+    metrics['Market Max Drawdown'] = round(max_drawdown(df['Cumulative_market']), 3)
+    metrics['Strategy Max Drawdown'] = round(max_drawdown(df['Cumulative_strategy']), 3)
+    metrics['AI_signal distribution'] = df['AI_signal'].value_counts()
+    return metrics
 
-print("\n=== PERFORMANCE METRICS ===")
-print("Market Sharpe:", round(market_sharpe, 3))
-print("Strategy Sharpe:", round(strategy_sharpe, 3))
-print("Market Max Drawdown:", round(market_dd, 3))
-print("Strategy Max Drawdown:", round(strategy_dd, 3))
+# ------------------------------
+# 5️⃣ Plot equity curves
+# ------------------------------
+def plot_equity(df):
+    plt.figure(figsize=(12,6))
+    plt.plot(df.index, df['Cumulative_market'], label='Buy & Hold', marker='o')
+    plt.plot(df.index, df['Cumulative_strategy'], label='AI Strategy', marker='x')
+    
+    # Missed opportunities
+    threshold = 0.005
+    missed = (df['AI_signal'] == 0) & (df['Returns'].shift(-1) > threshold)
+    plt.scatter(df.index[missed], df['Cumulative_market'][missed], color='red',
+                label='Missed Opportunities', s=100, marker='^')
+    
+    plt.title('AI Strategy vs Buy & Hold')
+    plt.xlabel('Date')
+    plt.ylabel('Cumulative Returns')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+# ------------------------------
+# 6️⃣ Main
+# ------------------------------
+if __name__ == "__main__":
+    df = get_data()
+    df = generate_signals(df)
+    df = apply_strategy(df)
+    
+    metrics = analytics(df)
+    print("\n=== PERFORMANCE METRICS ===")
+    for k,v in metrics.items():
+        print(k, ":", v)
+    
+    plot_equity(df)
