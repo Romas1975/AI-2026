@@ -5,13 +5,13 @@ import pandas as pd
 import numpy as np
 
 # -----------------------------
-# 1️⃣ Dummy data (įkelk savo spy_data)
+# 1️⃣ Dummy data (vietoje šių įkelk savo spy_data)
 # -----------------------------
-dates = pd.date_range(start='2024-01-01', periods=200, freq='B')
+dates = pd.date_range(start='2024-01-01', periods=500, freq='B')
 np.random.seed(42)
 spy_data = pd.DataFrame({
-    'Close': np.cumsum(np.random.randn(200)) + 100,
-    'AI_signal': np.random.randint(0,2,200)
+    'Close': np.cumsum(np.random.randn(500)) + 100,
+    'AI_signal': np.random.randint(0,2,500)
 }, index=dates)
 
 # Returns & cumulative
@@ -23,6 +23,16 @@ spy_data['Cumulative_strategy'] = (1 + spy_data['Strategy_returns']).cumprod()
 # Drawdowns
 spy_data['Drawdown_market'] = spy_data['Cumulative_market'] / spy_data['Cumulative_market'].cummax() - 1
 spy_data['Drawdown_strategy'] = spy_data['Cumulative_strategy'] / spy_data['Cumulative_strategy'].cummax() - 1
+
+# -----------------------------
+# Helper functions
+# -----------------------------
+def sharpe_ratio(returns):
+    return np.sqrt(252) * returns.mean() / returns.std()
+
+def max_drawdown(cumulative):
+    roll_max = cumulative.cummax()
+    return (cumulative / roll_max - 1).min()
 
 # -----------------------------
 # 2️⃣ Dash app
@@ -133,4 +143,4 @@ def update_dashboard(start_date, end_date):
 # 4️⃣ Run server
 # -----------------------------
 if __name__ == '__main__':
-    app.run_server(debug=True)
+    app.run(debug=True)
