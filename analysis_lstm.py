@@ -4,16 +4,56 @@ import plotly.graph_objs as go
 import pandas as pd
 import numpy as np
 import yfinance as yf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+from sklearn.preprocessing import MinMaxScaler
 
 # -----------------------------
-# 1️⃣ Load SPY data (pavyzdžiui)
+# 1️⃣ Load SPY data
 # -----------------------------
 ticker = "SPY"
-df = yf.download(ticker, start="2024-01-01", end="2026-02-19")
-df['AI_signal'] = np.random.randint(0,2,len(df))  # Dummy AI signal, vėliau naudok tikrą modelį
+df = yf.download(ticker, start="2024-01-01", end="2026-02-18")
+df['Close_orig'] = df['Close']
 
-# Returns & cumulative
-df['Market_returns'] = df['Close'].pct_change()
+# -----------------------------
+# 2️⃣ Prepare LSTM data
+# -----------------------------
+scaler = MinMaxScaler()
+df['Close_scaled'] = scaler.fit_transform(df[['Close']])
+
+window = 10  # past 10 days for prediction
+
+X, y = [], []
+for i in range(window, len(df)):
+    X.append(df['Close_scaled'].values[i-window:i])
+    y.append(df['Close_scaled'].values[i])
+X, y = np.array(X), np.array(y)
+X = X.reshape(X.shape[0], X.shape[1], 1)
+
+# -----------------------------
+# 3️⃣ Dummy LSTM model (pro structure)
+# -----------------------------
+model = Sequential()
+model.add(LSTM(50, input_shape=(X.shape[1], X.shape[2])))
+model.add(Dense(1))
+model.compile(optimizer='adam', loss='mse')
+# dummy fit just to initialize
+model.fit(X, y, epochs=1, batch_size=32, verbose=0)
+
+# -----------------------------
+# 4️⃣ Predict and generate AI_signal
+# -----------------------------
+preds = model.predict(X)
+preds_rescaled = scaler.inverse_transform(preds)
+
+df = df.iloc[window:]  # align with X
+df['Predicted_Close'] = preds_rescaled
+df['AI_signal'] = (df['Predicted_Close'] > df['Close_orig']).astype(int)  # 1 = long, 0 = cash
+
+# -----------------------------
+# 5️⃣ Compute returns
+# -----------------------------
+df['Market_returns'] = df['Close_orig'].pct_change()
 df['Cumulative_market'] = (1 + df['Market_returns']).cumprod()
 df['Strategy_returns'] = df['Market_returns'] * df['AI_signal']
 df['Cumulative_strategy'] = (1 + df['Strategy_returns']).cumprod()
@@ -21,7 +61,7 @@ df['Drawdown_market'] = df['Cumulative_market'] / df['Cumulative_market'].cummax
 df['Drawdown_strategy'] = df['Cumulative_strategy'] / df['Cumulative_strategy'].cummax() - 1
 
 # -----------------------------
-# 2️⃣ Metrics functions
+# 6️⃣ Metrics functions
 # -----------------------------
 def sharpe_ratio(returns):
     return np.sqrt(252) * returns.mean() / returns.std()
@@ -31,13 +71,13 @@ def max_drawdown(cumulative):
     return (cumulative / roll_max - 1).min()
 
 # -----------------------------
-# 3️⃣ Dash App
+# 7️⃣ Dash App
 # -----------------------------
 app = dash.Dash(__name__)
-app.title = "AI Strategy vs Buy & Hold"
+app.title = "AI Strategy LSTM Dashboard"
 
 app.layout = html.Div([
-    html.H1("AI Strategy vs Buy & Hold Dashboard", style={'textAlign':'center'}),
+    html.H1("AI Strategy (LSTM) vs Buy & Hold", style={'textAlign':'center'}),
     dcc.DatePickerRange(
         id='date-range',
         start_date=df.index.min(),
@@ -53,7 +93,7 @@ app.layout = html.Div([
 ])
 
 # -----------------------------
-# 4️⃣ Callback
+# 8️⃣ Callbacks
 # -----------------------------
 @app.callback(
     Output('cum_returns','figure'),
@@ -96,7 +136,7 @@ def update_dashboard(start_date, end_date):
     fig_rolling.add_trace(go.Scatter(x=dff.index, y=rolling_dd_strategy, name='Strategy Rolling DD', line=dict(color='orange', dash='dot')))
     fig_rolling.update_layout(title='Rolling Sharpe & Max Drawdown', xaxis_title='Date')
 
-    # --- Heatmap: average returns per weekday
+    # --- Heatmap
     dff['Weekday'] = dff.index.day_name()
     heatmap_data = dff.pivot_table(index='Weekday', values=['Market_returns','Strategy_returns'], aggfunc='mean')
     fig_heatmap = go.Figure()
@@ -104,7 +144,7 @@ def update_dashboard(start_date, end_date):
     fig_heatmap.add_trace(go.Heatmap(z=heatmap_data['Strategy_returns'].values, x=heatmap_data.index, y=['AI Strategy'], colorscale='Greens', showscale=True))
     fig_heatmap.update_layout(title='Average Daily Returns by Weekday', yaxis_title='Strategy')
 
-    # --- Metrics panel
+    # --- Metrics
     metrics_text = [
         html.P(f"Market Sharpe: {round(sharpe_ratio(dff['Market_returns'].dropna()),3)}"),
         html.P(f"Strategy Sharpe: {round(sharpe_ratio(dff['Strategy_returns'].dropna()),3)}"),
@@ -116,7 +156,8 @@ def update_dashboard(start_date, end_date):
     return fig_cum, fig_dd, fig_rolling, fig_heatmap, metrics_text
 
 # -----------------------------
-# 5️⃣ Run server
+# 9️⃣ Run server
 # -----------------------------
 if __name__ == '__main__':
     app.run()
+cc
