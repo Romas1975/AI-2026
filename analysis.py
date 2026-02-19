@@ -1,92 +1,80 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense
+import seaborn as sns
 
-# --- 1. Sukuriame dummy duomenis ---
-dates = pd.date_range(start='2025-01-01', periods=500, freq='B')  # 500 darbo dienų
-np.random.seed(42)
-prices = np.cumsum(np.random.randn(500)*2 + 0.5) + 100  # pseudo SPY kaina
-df = pd.DataFrame({'Close': prices}, index=dates)
+sns.set(style="whitegrid")
 
-# --- 2. Scale data ---
-scaler = MinMaxScaler()
-df['Close_scaled'] = scaler.fit_transform(df[['Close']])
+# --- 1. Pavyzdiniai duomenys ---
+data = {
+    'Close': [669.42, 674.48, 680.59, 684.83, 687.96, 690.38, 690.31, 687.85, 687.01, 681.92],
+    'AI_signal': [1, 0, 1, 1, 0, 0, 1, 1, 1, 0],
+    'Cumulative_market': [1.538, 1.550, 1.564, 1.573, 1.581, 1.586, 1.586, 1.580, 1.578, 1.567],
+    'Cumulative_strategy': [1.216, 1.225, 1.225, 1.233, 1.239, 1.239, 1.239, 1.234, 1.233, 1.224]
+}
+dates = pd.date_range(start='2025-12-17', periods=10, freq='B')
+spy_data = pd.DataFrame(data, index=dates)
 
-# --- 3. LSTM data preparation ---
-def create_lstm_data(df, col='Close_scaled', window=10):
-    X, y = [], []
-    for i in range(window, len(df)):
-        X.append(df[col].values[i-window:i])
-        y.append(1 if df[col].values[i] > df[col].values[i-1] else 0)
-    X = np.array(X)
-    y = np.array(y)
-    X = X.reshape((X.shape[0], X.shape[1], 1))
-    return X, y
+# --- 2. Apskaičiuojame daily returns ---
+spy_data['Market_returns'] = spy_data['Close'].pct_change()
+spy_data['Strategy_returns'] = spy_data['Market_returns'] * spy_data['AI_signal']
 
-window = 10
-X, y = create_lstm_data(df, col='Close_scaled', window=window)
+# --- 3. Drawdowns ---
+spy_data['Drawdown_market'] = spy_data['Cumulative_market'] / spy_data['Cumulative_market'].cummax() - 1
+spy_data['Drawdown_strategy'] = spy_data['Cumulative_strategy'] / spy_data['Cumulative_strategy'].cummax() - 1
 
-# --- 4. Dummy LSTM model (jeigu nera issaugoto) ---
-model = Sequential()
-model.add(LSTM(10, input_shape=(X.shape[1], 1)))
-model.add(Dense(1, activation='sigmoid'))
-model.compile(optimizer='adam', loss='binary_crossentropy')
-model.fit(X, y, epochs=3, batch_size=16, verbose=0)  # greitas treniravimas demo
-
-# --- 5. Predict AI signals ---
-probs = model.predict(X)
-ai_signal = (probs.flatten() > 0.5).astype(int)
-
-# --- 6. Backtest ---
-df_test = df.iloc[window:].copy()
-df_test['AI_signal'] = ai_signal
-df_test['Market_returns'] = df_test['Close'].pct_change()
-df_test['Strategy_returns'] = df_test['Market_returns'] * df_test['AI_signal']
-df_test['Cumulative_market'] = (1 + df_test['Market_returns']).cumprod()
-df_test['Cumulative_strategy'] = (1 + df_test['Strategy_returns']).cumprod()
-
-# --- 7. Performance metrics ---
+# --- 4. Sharpe ratio ---
 def sharpe_ratio(returns):
     return np.sqrt(252) * returns.mean() / returns.std()
 
+market_sharpe = sharpe_ratio(spy_data['Market_returns'].dropna())
+strategy_sharpe = sharpe_ratio(spy_data['Strategy_returns'].dropna())
+
+# --- 5. Max drawdown ---
 def max_drawdown(cumulative):
     return (cumulative / cumulative.cummax() - 1).min()
 
-market_sharpe = sharpe_ratio(df_test['Market_returns'].dropna())
-strategy_sharpe = sharpe_ratio(df_test['Strategy_returns'].dropna())
-market_dd = max_drawdown(df_test['Cumulative_market'])
-strategy_dd = max_drawdown(df_test['Cumulative_strategy'])
+market_dd = max_drawdown(spy_data['Cumulative_market'])
+strategy_dd = max_drawdown(spy_data['Cumulative_strategy'])
 
-print("\n=== PERFORMANCE METRICS ===")
-print("Market Sharpe :", round(market_sharpe, 3))
-print("Strategy Sharpe :", round(strategy_sharpe, 3))
-print("Market Max Drawdown :", round(market_dd, 3))
-print("Strategy Max Drawdown :", round(strategy_dd, 3))
-
-print("\nAI_signal distribution:")
-print(df_test['AI_signal'].value_counts())
-
-print("\nCorrelation with market returns:")
-print(df_test[['AI_signal', 'Market_returns']].corr())
-
-# --- 8. Plot equity ---
-plt.figure(figsize=(12,6))
-plt.plot(df_test.index, df_test['Cumulative_market'], label='Buy & Hold', marker='o')
-plt.plot(df_test.index, df_test['Cumulative_strategy'], label='AI Strategy', marker='x')
-
-# missed opportunities: AI signal 0, market went up >0.5%
-threshold = 0.005
-missed = (df_test['AI_signal'] == 0) & (df_test['Market_returns'].shift(-1) > threshold)
-plt.scatter(df_test.index[missed], df_test['Cumulative_market'][missed],
-            color='red', label='Missed Opportunities', s=80, marker='^')
-
-plt.title('AI Strategy vs Buy & Hold')
+# --- 6. Equity chart su drawdown ---
+plt.figure(figsize=(14,6))
+plt.plot(spy_data.index, spy_data['Cumulative_market'], label='Buy & Hold', marker='o')
+plt.plot(spy_data.index, spy_data['Cumulative_strategy'], label='AI Strategy', marker='x')
+plt.fill_between(spy_data.index, spy_data['Cumulative_market'], spy_data['Cumulative_market'].cummax(),
+                 color='red', alpha=0.2, label='Market Drawdown')
+plt.fill_between(spy_data.index, spy_data['Cumulative_strategy'], spy_data['Cumulative_strategy'].cummax(),
+                 color='blue', alpha=0.2, label='Strategy Drawdown')
+plt.title('Equity Curve & Drawdowns')
 plt.xlabel('Date')
 plt.ylabel('Cumulative Returns')
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
 plt.show()
+
+# --- 7. Daily returns histogram ---
+plt.figure(figsize=(12,4))
+sns.histplot(spy_data['Market_returns'].dropna(), color='orange', label='Market', kde=True, stat='density', bins=10)
+sns.histplot(spy_data['Strategy_returns'].dropna(), color='blue', label='AI Strategy', kde=True, stat='density', bins=10)
+plt.title('Daily Returns Distribution')
+plt.xlabel('Daily Return')
+plt.ylabel('Density')
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# --- 8. Signal statistics ---
+print("\n=== AI SIGNAL STATISTICS ===")
+print(spy_data['AI_signal'].value_counts())
+print("\nCorrelation of AI_signal with market returns:")
+print(spy_data[['AI_signal', 'Market_returns']].corr())
+
+# --- 9. Performance metrics ---
+print("\n=== PERFORMANCE METRICS ===")
+print(f"Market Sharpe : {market_sharpe:.3f}")
+print(f"Strategy Sharpe : {strategy_sharpe:.3f}")
+print(f"Market Max Drawdown : {market_dd:.3f}")
+print(f"Strategy Max Drawdown : {strategy_dd:.3f}")
+print(f"Total Return Market: {spy_data['Cumulative_market'].iloc[-1]-1:.3f}")
+print(f"Total Return Strategy: {spy_data['Cumulative_strategy'].iloc[-1]-1:.3f}")
