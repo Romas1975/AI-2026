@@ -1,3 +1,4 @@
 {
-    "python.defaultInterpreterPath": ".venv310\\Scripts\\python.exe"
+    "python.defaultInterpreterPath": ".venv310\\Scripts\\python.exe",
+    "python-envs.pythonProjects": []
 }
