@@ -9,7 +9,7 @@ import yfinance as yf
 # 1️⃣ Load SPY data (pavyzdžiui)
 # -----------------------------
 ticker = "SPY"
-df = yf.download(ticker, start="2024-01-01", end="2026-02-19")
+df = yf.download(ticker, start="2024-01-01", end="2026-02-19c")
 df['AI_signal'] = np.random.randint(0,2,len(df))  # Dummy AI signal, vėliau naudok tikrą modelį
 
 # Returns & cumulative
