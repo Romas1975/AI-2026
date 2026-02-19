@@ -1,11 +1,8 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
 
-sns.set(style="whitegrid")
-
-# --- 1. Pavyzdiniai duomenys ---
+# --- 1. Dummy duomenys (vietoje tavo spy_data) ---
 data = {
     'Close': [669.42, 674.48, 680.59, 684.83, 687.96, 690.38, 690.31, 687.85, 687.01, 681.92],
     'AI_signal': [1, 0, 1, 1, 0, 0, 1, 1, 1, 0],
@@ -15,7 +12,7 @@ data = {
 dates = pd.date_range(start='2025-12-17', periods=10, freq='B')
 spy_data = pd.DataFrame(data, index=dates)
 
-# --- 2. Apskaičiuojame daily returns ---
+# --- 2. Daily Returns ---
 spy_data['Market_returns'] = spy_data['Close'].pct_change()
 spy_data['Strategy_returns'] = spy_data['Market_returns'] * spy_data['AI_signal']
 
@@ -23,58 +20,63 @@ spy_data['Strategy_returns'] = spy_data['Market_returns'] * spy_data['AI_signal'
 spy_data['Drawdown_market'] = spy_data['Cumulative_market'] / spy_data['Cumulative_market'].cummax() - 1
 spy_data['Drawdown_strategy'] = spy_data['Cumulative_strategy'] / spy_data['Cumulative_strategy'].cummax() - 1
 
-# --- 4. Sharpe ratio ---
+# --- 4. Performance Metrics ---
 def sharpe_ratio(returns):
     return np.sqrt(252) * returns.mean() / returns.std()
 
-market_sharpe = sharpe_ratio(spy_data['Market_returns'].dropna())
-strategy_sharpe = sharpe_ratio(spy_data['Strategy_returns'].dropna())
-
-# --- 5. Max drawdown ---
 def max_drawdown(cumulative):
     return (cumulative / cumulative.cummax() - 1).min()
 
-market_dd = max_drawdown(spy_data['Cumulative_market'])
-strategy_dd = max_drawdown(spy_data['Cumulative_strategy'])
+metrics = {
+    'Market Sharpe': sharpe_ratio(spy_data['Market_returns'].dropna()),
+    'Strategy Sharpe': sharpe_ratio(spy_data['Strategy_returns'].dropna()),
+    'Market Max Drawdown': max_drawdown(spy_data['Cumulative_market']),
+    'Strategy Max Drawdown': max_drawdown(spy_data['Cumulative_strategy']),
+    'AI_signal 1 count': spy_data['AI_signal'].sum(),
+    'AI_signal 0 count': len(spy_data) - spy_data['AI_signal'].sum()
+}
 
-# --- 6. Equity chart su drawdown ---
-plt.figure(figsize=(14,6))
+print("=== PERFORMANCE METRICS ===")
+for k, v in metrics.items():
+    print(f"{k}: {round(v,3)}")
+
+# --- 5. Plotas Dashboard ---
+plt.figure(figsize=(14,8))
+
+# a) Cumulative Returns
+plt.subplot(2,2,1)
 plt.plot(spy_data.index, spy_data['Cumulative_market'], label='Buy & Hold', marker='o')
 plt.plot(spy_data.index, spy_data['Cumulative_strategy'], label='AI Strategy', marker='x')
-plt.fill_between(spy_data.index, spy_data['Cumulative_market'], spy_data['Cumulative_market'].cummax(),
-                 color='red', alpha=0.2, label='Market Drawdown')
-plt.fill_between(spy_data.index, spy_data['Cumulative_strategy'], spy_data['Cumulative_strategy'].cummax(),
-                 color='blue', alpha=0.2, label='Strategy Drawdown')
-plt.title('Equity Curve & Drawdowns')
-plt.xlabel('Date')
-plt.ylabel('Cumulative Returns')
+plt.title('Cumulative Returns')
 plt.legend()
 plt.grid(True)
-plt.tight_layout()
-plt.show()
 
-# --- 7. Daily returns histogram ---
-plt.figure(figsize=(12,4))
-sns.histplot(spy_data['Market_returns'].dropna(), color='orange', label='Market', kde=True, stat='density', bins=10)
-sns.histplot(spy_data['Strategy_returns'].dropna(), color='blue', label='AI Strategy', kde=True, stat='density', bins=10)
-plt.title('Daily Returns Distribution')
-plt.xlabel('Daily Return')
-plt.ylabel('Density')
+# b) Daily Returns
+plt.subplot(2,2,2)
+plt.plot(spy_data.index, spy_data['Market_returns'], label='Market Returns', marker='o')
+plt.plot(spy_data.index, spy_data['Strategy_returns'], label='Strategy Returns', marker='x')
+plt.title('Daily Returns')
 plt.legend()
+plt.grid(True)
+
+# c) Drawdowns
+plt.subplot(2,2,3)
+plt.plot(spy_data.index, spy_data['Drawdown_market'], label='Market Drawdown', marker='o')
+plt.plot(spy_data.index, spy_data['Drawdown_strategy'], label='Strategy Drawdown', marker='x')
+plt.title('Drawdowns')
+plt.legend()
+plt.grid(True)
+
+# d) Missed Opportunities
+plt.subplot(2,2,4)
+threshold = 0.005
+missed = (spy_data['AI_signal']==0) & (spy_data['Market_returns'] > threshold)
+plt.scatter(spy_data.index[missed], spy_data['Cumulative_market'][missed], color='red', s=100, label='Missed Opportunities', marker='^')
+plt.plot(spy_data.index, spy_data['Cumulative_market'], label='Buy & Hold', marker='o')
+plt.plot(spy_data.index, spy_data['Cumulative_strategy'], label='AI Strategy', marker='x')
+plt.title('Missed Opportunities')
+plt.legend()
+plt.grid(True)
+
 plt.tight_layout()
 plt.show()
-
-# --- 8. Signal statistics ---
-print("\n=== AI SIGNAL STATISTICS ===")
-print(spy_data['AI_signal'].value_counts())
-print("\nCorrelation of AI_signal with market returns:")
-print(spy_data[['AI_signal', 'Market_returns']].corr())
-
-# --- 9. Performance metrics ---
-print("\n=== PERFORMANCE METRICS ===")
-print(f"Market Sharpe : {market_sharpe:.3f}")
-print(f"Strategy Sharpe : {strategy_sharpe:.3f}")
-print(f"Market Max Drawdown : {market_dd:.3f}")
-print(f"Strategy Max Drawdown : {strategy_dd:.3f}")
-print(f"Total Return Market: {spy_data['Cumulative_market'].iloc[-1]-1:.3f}")
-print(f"Total Return Strategy: {spy_data['Cumulative_strategy'].iloc[-1]-1:.3f}")
