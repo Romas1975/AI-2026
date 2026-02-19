@@ -30,3 +30,27 @@ plt.legend()
 plt.grid(True)
 plt.tight_layout()
 plt.show()
+
+import numpy as np
+
+# Sharpe ratio
+def sharpe_ratio(returns):
+    return np.sqrt(252) * returns.mean() / returns.std()
+
+market_sharpe = sharpe_ratio(spy_data['Market_returns'].dropna())
+strategy_sharpe = sharpe_ratio(spy_data['Strategy_returns'].dropna())
+
+# Max drawdown
+def max_drawdown(cumulative):
+    roll_max = cumulative.cummax()
+    drawdown = cumulative / roll_max - 1
+    return drawdown.min()
+
+market_dd = max_drawdown(spy_data['Cumulative_market'])
+strategy_dd = max_drawdown(spy_data['Cumulative_strategy'])
+
+print("\n=== PERFORMANCE METRICS ===")
+print("Market Sharpe:", round(market_sharpe, 3))
+print("Strategy Sharpe:", round(strategy_sharpe, 3))
+print("Market Max Drawdown:", round(market_dd, 3))
+print("Strategy Max Drawdown:", round(strategy_dd, 3))
