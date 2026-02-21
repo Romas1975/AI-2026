@@ -1,43 +1,80 @@
 import dash
 from dash import dcc, html, Input, Output
-import plotly.graph_objs as go
+import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
 import yfinance as yf
 
-# -----------------------------
-# 1️⃣ Load SPY data (pavyzdžiui)
-# -----------------------------
-ticker = "SPY"
-df = yf.download(ticker, start="2024-01-01", end="2026-02-19c")
-df['AI_signal'] = np.random.randint(0,2,len(df))  # Dummy AI signal, vėliau naudok tikrą modelį
+# ============================================
+# 1️⃣ DATA LOADING
+# ============================================
 
-# Returns & cumulative
-df['Market_returns'] = df['Close'].pct_change()
-df['Cumulative_market'] = (1 + df['Market_returns']).cumprod()
-df['Strategy_returns'] = df['Market_returns'] * df['AI_signal']
-df['Cumulative_strategy'] = (1 + df['Strategy_returns']).cumprod()
-df['Drawdown_market'] = df['Cumulative_market'] / df['Cumulative_market'].cummax() - 1
-df['Drawdown_strategy'] = df['Cumulative_strategy'] / df['Cumulative_strategy'].cummax() - 1
+TICKER = "SPY"
+PERIOD = "2y"
 
-# -----------------------------
-# 2️⃣ Metrics functions
-# -----------------------------
+df = yf.download(TICKER, period=PERIOD, auto_adjust=True)
+
+# Sutvarkom MultiIndex jei atsiranda
+if isinstance(df.columns, pd.MultiIndex):
+    df.columns = df.columns.get_level_values(0)
+
+df = df.sort_index()
+
+if df.empty:
+    raise ValueError("No data downloaded from Yahoo Finance")
+
+# ============================================
+# 2️⃣ STRATEGY LOGIC
+# ============================================
+
+# Market returns
+df["Market_returns"] = df["Close"].pct_change()
+
+# Dummy AI signal (kol neturim modelio)
+np.random.seed(42)
+df["AI_signal"] = np.random.randint(0, 2, len(df))
+
+# Strategy returns
+df["Strategy_returns"] = df["Market_returns"] * df["AI_signal"]
+
+# Cumulative
+df["Cumulative_market"] = (1 + df["Market_returns"]).cumprod()
+df["Cumulative_strategy"] = (1 + df["Strategy_returns"]).cumprod()
+
+# Drawdown
+df["Drawdown_market"] = df["Cumulative_market"] / df["Cumulative_market"].cummax() - 1
+df["Drawdown_strategy"] = df["Cumulative_strategy"] / df["Cumulative_strategy"].cummax() - 1
+
+
+# ============================================
+# 3️⃣ METRICS FUNCTIONS
+# ============================================
+
 def sharpe_ratio(returns):
+    returns = returns.dropna()
+    if returns.std() == 0:
+        return 0
     return np.sqrt(252) * returns.mean() / returns.std()
 
 def max_drawdown(cumulative):
     roll_max = cumulative.cummax()
-    return (cumulative / roll_max - 1).min()
+    drawdown = cumulative / roll_max - 1
+    return drawdown.min()
 
-# -----------------------------
-# 3️⃣ Dash App
-# -----------------------------
+def exposure(signal):
+    return signal.mean()
+
+
+# ============================================
+# 4️⃣ DASH APP
+# ============================================
+
 app = dash.Dash(__name__)
-app.title = "AI Strategy vs Buy & Hold"
+app.title = "AI Trading Dashboard"
 
 app.layout = html.Div([
-    html.H1("AI Strategy vs Buy & Hold Dashboard", style={'textAlign':'center'}),
+    html.H1("AI Strategy vs Buy & Hold", style={'textAlign':'center'}),
+
     dcc.DatePickerRange(
         id='date-range',
         start_date=df.index.min(),
@@ -45,78 +82,111 @@ app.layout = html.Div([
         min_date_allowed=df.index.min(),
         max_date_allowed=df.index.max()
     ),
+
     dcc.Graph(id='cum_returns'),
     dcc.Graph(id='drawdowns'),
     dcc.Graph(id='rolling_metrics'),
-    dcc.Graph(id='heatmap_returns'),
-    html.Div(id='metrics', style={'textAlign':'center','marginTop':'20px','fontSize':'18px'})
+
+    html.Div(id='metrics', style={
+        'textAlign':'center',
+        'marginTop':'20px',
+        'fontSize':'18px'
+    })
 ])
 
-# -----------------------------
-# 4️⃣ Callback
-# -----------------------------
+
+# ============================================
+# 5️⃣ CALLBACK
+# ============================================
+
 @app.callback(
     Output('cum_returns','figure'),
     Output('drawdowns','figure'),
     Output('rolling_metrics','figure'),
-    Output('heatmap_returns','figure'),
     Output('metrics','children'),
     Input('date-range','start_date'),
     Input('date-range','end_date')
 )
 def update_dashboard(start_date, end_date):
-    dff = df.loc[start_date:end_date]
 
-    # --- Cumulative Returns
+    dff = df.loc[start_date:end_date].copy()
+
+    if dff.empty:
+        return go.Figure(), go.Figure(), go.Figure(), "No data in selected range"
+
+    # -----------------------
+    # CUMULATIVE RETURNS
+    # -----------------------
     fig_cum = go.Figure()
-    fig_cum.add_trace(go.Scatter(x=dff.index, y=dff['Cumulative_market'], name='Buy & Hold', mode='lines+markers'))
-    fig_cum.add_trace(go.Scatter(x=dff.index, y=dff['Cumulative_strategy'], name='AI Strategy', mode='lines+markers'))
-    threshold = 0.005
-    missed = (dff['AI_signal']==0) & (dff['Market_returns'].shift(-1) > threshold)
-    fig_cum.add_trace(go.Scatter(x=dff.index[missed], y=dff['Cumulative_market'][missed], mode='markers', marker=dict(color='red', size=10, symbol='triangle-up'), name='Missed Opportunities'))
-    fig_cum.update_layout(title='Cumulative Returns', xaxis_title='Date', yaxis_title='Cumulative Returns')
+    fig_cum.add_trace(go.Scatter(
+        x=dff.index, y=dff['Cumulative_market'],
+        name='Buy & Hold'
+    ))
+    fig_cum.add_trace(go.Scatter(
+        x=dff.index, y=dff['Cumulative_strategy'],
+        name='AI Strategy'
+    ))
+    fig_cum.update_layout(title='Cumulative Returns')
 
-    # --- Drawdowns
+    # -----------------------
+    # DRAWDOWNS
+    # -----------------------
     fig_dd = go.Figure()
-    fig_dd.add_trace(go.Scatter(x=dff.index, y=dff['Drawdown_market'], name='Market Drawdown', line=dict(color='blue')))
-    fig_dd.add_trace(go.Scatter(x=dff.index, y=dff['Drawdown_strategy'], name='Strategy Drawdown', line=dict(color='green')))
-    fig_dd.update_layout(title='Drawdowns', xaxis_title='Date', yaxis_title='Drawdown')
+    fig_dd.add_trace(go.Scatter(
+        x=dff.index, y=dff['Drawdown_market'],
+        name='Market Drawdown'
+    ))
+    fig_dd.add_trace(go.Scatter(
+        x=dff.index, y=dff['Drawdown_strategy'],
+        name='Strategy Drawdown'
+    ))
+    fig_dd.update_layout(title='Drawdowns')
 
-    # --- Rolling metrics
+    # -----------------------
+    # ROLLING SHARPE (optimized)
+    # -----------------------
     window = 20
-    rolling_sharpe_market = dff['Market_returns'].rolling(window).mean() / dff['Market_returns'].rolling(window).std() * np.sqrt(252)
-    rolling_sharpe_strategy = dff['Strategy_returns'].rolling(window).mean() / dff['Strategy_returns'].rolling(window).std() * np.sqrt(252)
-    rolling_dd_market = dff['Cumulative_market'].rolling(window).apply(lambda x: (x/x.cummax()-1).min())
-    rolling_dd_strategy = dff['Cumulative_strategy'].rolling(window).apply(lambda x: (x/x.cummax()-1).min())
 
-    fig_rolling = go.Figure()
-    fig_rolling.add_trace(go.Scatter(x=dff.index, y=rolling_sharpe_market, name='Market Rolling Sharpe', line=dict(color='blue')))
-    fig_rolling.add_trace(go.Scatter(x=dff.index, y=rolling_sharpe_strategy, name='Strategy Rolling Sharpe', line=dict(color='green')))
-    fig_rolling.add_trace(go.Scatter(x=dff.index, y=rolling_dd_market, name='Market Rolling DD', line=dict(color='red', dash='dot')))
-    fig_rolling.add_trace(go.Scatter(x=dff.index, y=rolling_dd_strategy, name='Strategy Rolling DD', line=dict(color='orange', dash='dot')))
-    fig_rolling.update_layout(title='Rolling Sharpe & Max Drawdown', xaxis_title='Date')
+    rolling_sharpe_market = (
+        dff['Market_returns'].rolling(window).mean() /
+        dff['Market_returns'].rolling(window).std()
+    ) * np.sqrt(252)
 
-    # --- Heatmap: average returns per weekday
-    dff['Weekday'] = dff.index.day_name()
-    heatmap_data = dff.pivot_table(index='Weekday', values=['Market_returns','Strategy_returns'], aggfunc='mean')
-    fig_heatmap = go.Figure()
-    fig_heatmap.add_trace(go.Heatmap(z=heatmap_data['Market_returns'].values, x=heatmap_data.index, y=['Buy & Hold'], colorscale='Blues', showscale=True))
-    fig_heatmap.add_trace(go.Heatmap(z=heatmap_data['Strategy_returns'].values, x=heatmap_data.index, y=['AI Strategy'], colorscale='Greens', showscale=True))
-    fig_heatmap.update_layout(title='Average Daily Returns by Weekday', yaxis_title='Strategy')
+    rolling_sharpe_strategy = (
+        dff['Strategy_returns'].rolling(window).mean() /
+        dff['Strategy_returns'].rolling(window).std()
+    ) * np.sqrt(252)
 
-    # --- Metrics panel
-    metrics_text = [
-        html.P(f"Market Sharpe: {round(sharpe_ratio(dff['Market_returns'].dropna()),3)}"),
-        html.P(f"Strategy Sharpe: {round(sharpe_ratio(dff['Strategy_returns'].dropna()),3)}"),
+    fig_roll = go.Figure()
+    fig_roll.add_trace(go.Scatter(
+        x=dff.index, y=rolling_sharpe_market,
+        name='Market Rolling Sharpe'
+    ))
+    fig_roll.add_trace(go.Scatter(
+        x=dff.index, y=rolling_sharpe_strategy,
+        name='Strategy Rolling Sharpe'
+    ))
+    fig_roll.update_layout(title='Rolling Sharpe (20d)')
+
+    # -----------------------
+    # METRICS PANEL
+    # -----------------------
+    metrics_panel = [
+        html.P(f"Total Market Return: {round(dff['Cumulative_market'].iloc[-1]-1,3)}"),
+        html.P(f"Total Strategy Return: {round(dff['Cumulative_strategy'].iloc[-1]-1,3)}"),
+        html.P(f"Market Sharpe: {round(sharpe_ratio(dff['Market_returns']),3)}"),
+        html.P(f"Strategy Sharpe: {round(sharpe_ratio(dff['Strategy_returns']),3)}"),
         html.P(f"Market Max Drawdown: {round(max_drawdown(dff['Cumulative_market']),3)}"),
         html.P(f"Strategy Max Drawdown: {round(max_drawdown(dff['Cumulative_strategy']),3)}"),
-        html.P(f"AI_signal distribution: {dff['AI_signal'].value_counts().to_dict()}")
+        html.P(f"Strategy Exposure: {round(exposure(dff['AI_signal']),3)}")
     ]
 
-    return fig_cum, fig_dd, fig_rolling, fig_heatmap, metrics_text
+    return fig_cum, fig_dd, fig_roll, metrics_panel
 
-# -----------------------------
-# 5️⃣ Run server
-# -----------------------------
+
+# ============================================
+# 6️⃣ RUN
+# ============================================
+
 if __name__ == '__main__':
-    app.run()
+    app.run(debug=False)
