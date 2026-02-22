@@ -30,6 +30,13 @@ if df.empty:
 # Market returns
 df["Market_returns"] = df["Close"].pct_change()
 
+target_vol = 0.15
+
+df["Vol_20"] = df["Market_returns"].rolling(20).std() * np.sqrt(252)
+
+df["AI_signal"] = target_vol / df["Vol_20"]
+df["AI_signal"] = df["AI_signal"].clip(0.2, 1.5)
+
 # Dummy AI signal (kol neturim modelio)
 
 # MACD
