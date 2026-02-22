@@ -31,11 +31,38 @@ if df.empty:
 df["Market_returns"] = df["Close"].pct_change()
 
 # Dummy AI signal (kol neturim modelio)
-np.random.seed(42)
-df["AI_signal"] = np.random.randint(0, 2, len(df))
+
+# MACD
+df["Close"] = df["Close"].astype(float)
+
+ema12 = df["Close"].ewm(span=12, adjust=False).mean()
+ema26 = df["Close"].ewm(span=26, adjust=False).mean()
+
+df["MACD"] = ema12 - ema26
+df["Signal_line"] = df["MACD"].ewm(span=9, adjust=False).mean()
+
+df["AI_signal"] = 0
+df.loc[df["MACD"] > df["Signal_line"], "AI_signal"] = 1
+
+
 
 # Strategy returns
 df["Strategy_returns"] = df["Market_returns"] * df["AI_signal"]
+# Be look-ahead
+df["Strategy_returns"] = df["Market_returns"] * df["AI_signal"].shift(1)
+
+df["Cumulative_strategy"] = (1 + df["Strategy_returns"]).cumprod()
+
+df["Drawdown_strategy"] = df["Cumulative_strategy"] / df["Cumulative_strategy"].cummax() - 1
+
+# Rolling volatility
+df["Volatility"] = df["Market_returns"].rolling(20).std() * np.sqrt(252)
+
+vol_threshold = df["Volatility"].median()
+
+df["AI_signal"] = np.where(df["Volatility"] > vol_threshold, 0.5, 1.0)
+
+df["Strategy_returns"] = df["Market_returns"] * df["AI_signal"].shift(1)
 
 # Cumulative
 df["Cumulative_market"] = (1 + df["Market_returns"]).cumprod()
