@@ -60,7 +60,11 @@ df["Volatility"] = df["Market_returns"].rolling(20).std() * np.sqrt(252)
 
 vol_threshold = df["Volatility"].median()
 
-df["AI_signal"] = np.where(df["Volatility"] > vol_threshold, 0.5, 1.0)
+# Scale exposure pagal volatility lygį
+max_vol = df["Volatility"].quantile(0.9)
+
+df["AI_signal"] = 1 - (df["Volatility"] / max_vol)
+df["AI_signal"] = df["AI_signal"].clip(lower=0.2, upper=1.0)
 
 df["Strategy_returns"] = df["Market_returns"] * df["AI_signal"].shift(1)
 
