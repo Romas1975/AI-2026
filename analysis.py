@@ -4,64 +4,100 @@ import plotly.graph_objs as go
 import pandas as pd
 import numpy as np
 import yfinance as yf
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
 
 # -----------------------------
-# 1️⃣ Helper functions
+# 1️⃣ Load data
 # -----------------------------
-def compute_macd(df, span_fast, span_slow, span_signal):
-    ema_fast = df['Close'].ewm(span=span_fast, adjust=False).mean()
-    ema_slow = df['Close'].ewm(span=span_slow, adjust=False).mean()
-    macd = ema_fast - ema_slow
-    signal = macd.ewm(span=span_signal, adjust=False).mean()
-    return macd, signal
+ticker = "SPY"
+df = yf.download(ticker, period="2y", auto_adjust=True)
 
-def compute_metrics(df):
-    df['Market_returns'] = df['Close'].pct_change()
-    df['Strategy_returns'] = df['Market_returns'] * df['AI_signal']
-    df['Cumulative_market'] = (1 + df['Market_returns']).cumprod()
-    df['Cumulative_strategy'] = (1 + df['Strategy_returns']).cumprod()
-    df['Drawdown_market'] = df['Cumulative_market'] / df['Cumulative_market'].cummax() - 1
-    df['Drawdown_strategy'] = df['Cumulative_strategy'] / df['Cumulative_strategy'].cummax() - 1
-    
-    metrics = {
-        'Total Market Return': df['Cumulative_market'].iloc[-1] - 1,
-        'Total Strategy Return': df['Cumulative_strategy'].iloc[-1] - 1,
-        'Market Sharpe': np.sqrt(252)*df['Market_returns'].mean()/df['Market_returns'].std(),
-        'Strategy Sharpe': np.sqrt(252)*df['Strategy_returns'].mean()/df['Strategy_returns'].std(),
-        'Market Max Drawdown': df['Drawdown_market'].min(),
-        'Strategy Max Drawdown': df['Drawdown_strategy'].min(),
-        'Strategy Exposure (mean)': df['AI_signal'].mean(),
-        'Buy Signals': int((df['AI_signal']==1).sum()),
-        'Sell Signals': int((df['AI_signal']==0).sum())
-    }
-    return df, metrics
+# Ensure single-level columns
+if isinstance(df.columns, pd.MultiIndex):
+    df.columns = df.columns.get_level_values(0)
+
+# Check if empty
+if df.empty:
+    raise ValueError("Yahoo returned no data")
 
 # -----------------------------
-# 2️⃣ Dash App
+# 2️⃣ MACD signal (optional benchmark)
+# -----------------------------
+ema12 = df['Close'].ewm(span=12).mean()
+ema26 = df['Close'].ewm(span=26).mean()
+df['MACD'] = ema12 - ema26
+df['Signal_line'] = df['MACD'].ewm(span=9).mean()
+df['MACD_signal'] = np.where(df['MACD'] > df['Signal_line'], 1, 0)
+
+# -----------------------------
+# 3️⃣ LSTM preprocessing
+# -----------------------------
+window = 20
+scaler = MinMaxScaler()
+df['Close_scaled'] = scaler.fit_transform(df[['Close']])
+
+X, y = [], []
+for i in range(window, len(df)):
+    X.append(df['Close_scaled'].values[i-window:i])
+    y.append(df['Close_scaled'].values[i])
+X, y = np.array(X), np.array(y)
+X = X.reshape((X.shape[0], X.shape[1], 1))
+
+# -----------------------------
+# 4️⃣ LSTM model
+# -----------------------------
+model = Sequential([
+    LSTM(50, input_shape=(X.shape[1], 1)),
+    Dense(1)
+])
+model.compile(optimizer='adam', loss='mse')
+model.fit(X, y, epochs=5, batch_size=32, verbose=0)
+
+# Predict next day prices
+y_pred = model.predict(X, verbose=0)
+df['LSTM_pred'] = np.nan
+df['LSTM_pred'].iloc[window:] = scaler.inverse_transform(y_pred.reshape(-1,1)).flatten()
+
+# -----------------------------
+# 5️⃣ Generate AI signals from LSTM
+# -----------------------------
+df['AI_signal'] = 0
+df['AI_signal'].iloc[window:] = (df['LSTM_pred'].iloc[window:] > df['Close'].iloc[window:]).astype(int)
+
+# -----------------------------
+# 6️⃣ Compute returns & drawdowns
+# -----------------------------
+df['Market_returns'] = df['Close'].pct_change()
+df['Strategy_returns'] = df['Market_returns'] * df['AI_signal']
+df['Cumulative_market'] = (1 + df['Market_returns']).cumprod()
+df['Cumulative_strategy'] = (1 + df['Strategy_returns']).cumprod()
+df['Drawdown_market'] = df['Cumulative_market']/df['Cumulative_market'].cummax() - 1
+df['Drawdown_strategy'] = df['Cumulative_strategy']/df['Cumulative_strategy'].cummax() - 1
+
+# Metrics functions
+def sharpe_ratio(returns):
+    return np.sqrt(252) * returns.mean() / returns.std()
+
+def max_drawdown(cumulative):
+    return (cumulative / cumulative.cummax() - 1).min()
+
+# -----------------------------
+# 7️⃣ Dash app
 # -----------------------------
 app = dash.Dash(__name__)
-app.title = "AI Strategy vs Buy & Hold"
+app.title = "LSTM AI Strategy Dashboard"
 
-# -----------------------------
-# 3️⃣ Layout
-# -----------------------------
 app.layout = html.Div([
-    html.H1("AI Strategy vs Buy & Hold Dashboard", style={'textAlign':'center'}),
-    html.Div([
-        html.Label("Select Ticker:"),
-        dcc.Dropdown(
-            id='ticker-dropdown',
-            options=[{'label': t, 'value': t} for t in ['SPY','AAPL','MSFT','GOOG']],
-            value='SPY',
-            clearable=False
-        ),
-        html.Br(),
-        html.Label("MACD Parameters:"),
-        html.Div(["Fast EMA:", dcc.Slider(id='ema-fast', min=5, max=30, step=1, value=12, tooltip={"placement":"bottom"})]),
-        html.Div(["Slow EMA:", dcc.Slider(id='ema-slow', min=20, max=60, step=1, value=26, tooltip={"placement":"bottom"})]),
-        html.Div(["Signal span:", dcc.Slider(id='signal-span', min=5, max=20, step=1, value=9, tooltip={"placement":"bottom"})])
-    ], style={'marginBottom':'20px','padding':'10px','border':'1px solid #ccc'}),
-    
+    html.H1("AI Strategy vs Buy & Hold", style={'textAlign':'center'}),
+    dcc.DatePickerRange(
+        id='date-range',
+        start_date=df.index.min(),
+        end_date=df.index.max(),
+        min_date_allowed=df.index.min(),
+        max_date_allowed=df.index.max()
+    ),
     dcc.Graph(id='cum_returns'),
     dcc.Graph(id='drawdowns'),
     dcc.Graph(id='rolling_metrics'),
@@ -70,7 +106,7 @@ app.layout = html.Div([
 ])
 
 # -----------------------------
-# 4️⃣ Callback
+# 8️⃣ Callback
 # -----------------------------
 @app.callback(
     Output('cum_returns','figure'),
@@ -78,60 +114,57 @@ app.layout = html.Div([
     Output('rolling_metrics','figure'),
     Output('heatmap_returns','figure'),
     Output('metrics','children'),
-    Input('ticker-dropdown','value'),
-    Input('ema-fast','value'),
-    Input('ema-slow','value'),
-    Input('signal-span','value')
+    Input('date-range','start_date'),
+    Input('date-range','end_date')
 )
-def update_dashboard(ticker, span_fast, span_slow, span_signal):
-    df = yf.download(ticker, period="1y", auto_adjust=True)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+def update_dashboard(start_date, end_date):
+    dff = df.loc[start_date:end_date]
 
-    macd, signal = compute_macd(df, span_fast, span_slow, span_signal)
-    df['MACD'] = macd
-    df['Signal_line'] = signal
-    df['AI_signal'] = np.where(df['MACD'] > df['Signal_line'],1,0)
-
-    df, metrics = compute_metrics(df)
-    
-    # --- Cumulative Returns ---
+    # Cumulative returns
     fig_cum = go.Figure()
-    fig_cum.add_trace(go.Scatter(x=df.index, y=df['Cumulative_market'], name='Buy & Hold', mode='lines+markers'))
-    fig_cum.add_trace(go.Scatter(x=df.index, y=df['Cumulative_strategy'], name='AI Strategy', mode='lines+markers'))
+    fig_cum.add_trace(go.Scatter(x=dff.index, y=dff['Cumulative_market'], name='Buy & Hold', mode='lines+markers'))
+    fig_cum.add_trace(go.Scatter(x=dff.index, y=dff['Cumulative_strategy'], name='AI Strategy', mode='lines+markers'))
 
-    # --- Drawdowns ---
+    # Drawdowns
     fig_dd = go.Figure()
-    fig_dd.add_trace(go.Scatter(x=df.index, y=df['Drawdown_market'], name='Market Drawdown', line=dict(color='blue')))
-    fig_dd.add_trace(go.Scatter(x=df.index, y=df['Drawdown_strategy'], name='Strategy Drawdown', line=dict(color='green')))
+    fig_dd.add_trace(go.Scatter(x=dff.index, y=dff['Drawdown_market'], name='Market Drawdown'))
+    fig_dd.add_trace(go.Scatter(x=dff.index, y=dff['Drawdown_strategy'], name='Strategy Drawdown'))
 
-    # --- Rolling Metrics ---
+    # Rolling metrics
     window = 20
-    rolling_sharpe_market = df['Market_returns'].rolling(window).mean() / df['Market_returns'].rolling(window).std() * np.sqrt(252)
-    rolling_sharpe_strategy = df['Strategy_returns'].rolling(window).mean() / df['Strategy_returns'].rolling(window).std() * np.sqrt(252)
-    rolling_dd_market = df['Cumulative_market'].rolling(window).apply(lambda x: (x/x.cummax()-1).min())
-    rolling_dd_strategy = df['Cumulative_strategy'].rolling(window).apply(lambda x: (x/x.cummax()-1).min())
+    rolling_sharpe_market = dff['Market_returns'].rolling(window).mean() / dff['Market_returns'].rolling(window).std() * np.sqrt(252)
+    rolling_sharpe_strategy = dff['Strategy_returns'].rolling(window).mean() / dff['Strategy_returns'].rolling(window).std() * np.sqrt(252)
+    rolling_dd_market = dff['Cumulative_market'].rolling(window).apply(lambda x: (x/x.cummax()-1).min())
+    rolling_dd_strategy = dff['Cumulative_strategy'].rolling(window).apply(lambda x: (x/x.cummax()-1).min())
 
     fig_rolling = go.Figure()
-    fig_rolling.add_trace(go.Scatter(x=df.index, y=rolling_sharpe_market, name='Market Rolling Sharpe', line=dict(color='blue')))
-    fig_rolling.add_trace(go.Scatter(x=df.index, y=rolling_sharpe_strategy, name='Strategy Rolling Sharpe', line=dict(color='green')))
-    fig_rolling.add_trace(go.Scatter(x=df.index, y=rolling_dd_market, name='Market Rolling DD', line=dict(color='red', dash='dot')))
-    fig_rolling.add_trace(go.Scatter(x=df.index, y=rolling_dd_strategy, name='Strategy Rolling DD', line=dict(color='orange', dash='dot')))
+    fig_rolling.add_trace(go.Scatter(x=dff.index, y=rolling_sharpe_market, name='Market Rolling Sharpe'))
+    fig_rolling.add_trace(go.Scatter(x=dff.index, y=rolling_sharpe_strategy, name='Strategy Rolling Sharpe'))
+    fig_rolling.add_trace(go.Scatter(x=dff.index, y=rolling_dd_market, name='Market Rolling DD'))
+    fig_rolling.add_trace(go.Scatter(x=dff.index, y=rolling_dd_strategy, name='Strategy Rolling DD'))
 
-    # --- Heatmap ---
-    df['Weekday'] = df.index.day_name()
-    heatmap_data = df.pivot_table(index='Weekday', values=['Market_returns','Strategy_returns'], aggfunc='mean')
+    # Heatmap
+    dff['Weekday'] = dff.index.day_name()
+    heatmap_data = dff.pivot_table(index='Weekday', values=['Market_returns','Strategy_returns'], aggfunc='mean')
     fig_heatmap = go.Figure()
-    fig_heatmap.add_trace(go.Heatmap(z=heatmap_data['Market_returns'].values, x=heatmap_data.index, y=['Buy & Hold'], colorscale='Blues', showscale=True))
-    fig_heatmap.add_trace(go.Heatmap(z=heatmap_data['Strategy_returns'].values, x=heatmap_data.index, y=['AI Strategy'], colorscale='Greens', showscale=True))
+    fig_heatmap.add_trace(go.Heatmap(z=heatmap_data['Market_returns'].values, x=heatmap_data.index, y=['Market'], colorscale='Blues'))
+    fig_heatmap.add_trace(go.Heatmap(z=heatmap_data['Strategy_returns'].values, x=heatmap_data.index, y=['AI Strategy'], colorscale='Greens'))
 
-    # --- Metrics Panel ---
-    metrics_text = [html.P(f"{k}: {round(v,3) if isinstance(v,float) else v}") for k,v in metrics.items()]
+    # Metrics panel
+    metrics_text = [
+        html.P(f"Market Sharpe: {round(sharpe_ratio(dff['Market_returns'].dropna()),3)}"),
+        html.P(f"Strategy Sharpe: {round(sharpe_ratio(dff['Strategy_returns'].dropna()),3)}"),
+        html.P(f"Market Max Drawdown: {round(max_drawdown(dff['Cumulative_market']),3)}"),
+        html.P(f"Strategy Max Drawdown: {round(max_drawdown(dff['Cumulative_strategy']),3)}"),
+        html.P(f"Strategy Exposure (mean): {round(dff['AI_signal'].mean(),3)}"),
+        html.P(f"Number of Buy signals: {int((dff['AI_signal']==1).sum())}"),
+        html.P(f"Number of Sell signals: {int((dff['AI_signal']==0).sum())}")
+    ]
 
     return fig_cum, fig_dd, fig_rolling, fig_heatmap, metrics_text
 
 # -----------------------------
-# 5️⃣ Run Server
+# 9️⃣ Run server
 # -----------------------------
 if __name__ == '__main__':
-    app.run()
+    app.run(debug=True)
