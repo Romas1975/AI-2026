@@ -1,76 +1,151 @@
 import numpy as np
 import pandas as pd
 import yfinance as yf
+import dash
+from dash import dcc, html
+import plotly.graph_objs as go
 
-# ==============================
-# 1️⃣ Load 5 years data
-# ==============================
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Input
+from tensorflow.keras.callbacks import EarlyStopping
+
+# =========================
+# 1. Load Data
+# =========================
+
 ticker = "SPY"
 df = yf.download(ticker, period="5y", auto_adjust=True)
 
 if isinstance(df.columns, pd.MultiIndex):
     df.columns = df.columns.get_level_values(0)
 
-df["Market_returns"] = df["Close"].pct_change()
+df["Return"] = df["Close"].pct_change()
 
-# ==============================
-# 2️⃣ Walk-forward parameters
-# ==============================
-train_size = 252      # 1 year
-test_size = 63        # 3 months
+# =========================
+# 2. Feature Engineering
+# =========================
 
-start = 0
-equity_curve = []
-all_returns = []
+# Lag returns
+for i in range(1,6):
+    df[f"lag_{i}"] = df["Return"].shift(i)
 
-# ==============================
-# 3️⃣ Walk-forward loop
-# ==============================
-while start + train_size + test_size < len(df):
+# Volatility
+df["vol_20"] = df["Return"].rolling(20).std()
 
-    train = df.iloc[start:start+train_size].copy()
-    test = df.iloc[start+train_size:start+train_size+test_size].copy()
+# RSI
+delta = df["Close"].diff()
+gain = delta.clip(lower=0)
+loss = -delta.clip(upper=0)
+avg_gain = gain.rolling(14).mean()
+avg_loss = loss.rolling(14).mean()
+rs = avg_gain / avg_loss
+df["RSI"] = 100 - (100 / (1 + rs))
 
-    # ---- MACD computed ONLY on train
-    ema12 = train["Close"].ewm(span=12).mean()
-    ema26 = train["Close"].ewm(span=26).mean()
-    macd = ema12 - ema26
-    signal = macd.ewm(span=9).mean()
+# Moving average slope
+df["MA20"] = df["Close"].rolling(20).mean()
+df["MA50"] = df["Close"].rolling(50).mean()
+df["MA_slope"] = df["MA20"] - df["MA50"]
 
-    last_macd = macd.iloc[-1]
-    last_signal = signal.iloc[-1]
+# Target
+df["Target"] = df["Return"].shift(-1)
 
-    # ---- Apply fixed rule on test
-    test["Signal"] = np.where(last_macd > last_signal, 1, 0)
+df.dropna(inplace=True)
 
-    test["Strategy_returns"] = test["Market_returns"] * test["Signal"]
+# =========================
+# 3. Prepare Data
+# =========================
 
-    all_returns.append(test["Strategy_returns"])
+features = ["lag_1","lag_2","lag_3","lag_4","lag_5",
+            "vol_20","RSI","MA_slope"]
 
-    start += test_size
+X = df[features].values
+y = df["Target"].values
 
-# ==============================
-# 4️⃣ Combine results
-# ==============================
-strategy_returns = pd.concat(all_returns).dropna()
-market_returns = df.loc[strategy_returns.index, "Market_returns"]
+scaler = StandardScaler()
+X = scaler.fit_transform(X)
 
-cum_market = (1 + market_returns).cumprod()
-cum_strategy = (1 + strategy_returns).cumprod()
+# reshape for LSTM
+X = X.reshape((X.shape[0], 1, X.shape[1]))
 
-# ==============================
-# 5️⃣ Metrics
-# ==============================
+# train/test split (chronological)
+split = int(len(X)*0.7)
+X_train, X_test = X[:split], X[split:]
+y_train, y_test = y[:split], y[split:]
+
+# =========================
+# 4. Build LSTM
+# =========================
+
+model = Sequential([
+    Input(shape=(1, X.shape[2])),
+    LSTM(32),
+    Dense(16, activation='relu'),
+    Dense(1)
+])
+
+model.compile(optimizer="adam", loss="mse")
+
+early_stop = EarlyStopping(patience=5, restore_best_weights=True)
+
+model.fit(
+    X_train, y_train,
+    epochs=50,
+    batch_size=32,
+    validation_split=0.2,
+    callbacks=[early_stop],
+    verbose=1
+)
+
+# =========================
+# 5. Predictions
+# =========================
+
+pred = model.predict(X_test).flatten()
+
+df_test = df.iloc[split:].copy()
+df_test["Predicted_Return"] = pred
+
+df_test["Signal"] = np.where(df_test["Predicted_Return"] > 0, 1, 0)
+
+df_test["Strategy_Return"] = df_test["Return"] * df_test["Signal"]
+
+df_test["Cumulative_Market"] = (1 + df_test["Return"]).cumprod()
+df_test["Cumulative_Strategy"] = (1 + df_test["Strategy_Return"]).cumprod()
+
+# =========================
+# 6. Metrics
+# =========================
+
 def sharpe(r):
-    return np.sqrt(252) * r.mean() / r.std()
+    return np.sqrt(252)*r.mean()/r.std()
 
-def max_dd(cum):
-    roll_max = cum.cummax()
-    return (cum / roll_max - 1).min()
+print("Market Sharpe:", round(sharpe(df_test["Return"]),3))
+print("Strategy Sharpe:", round(sharpe(df_test["Strategy_Return"]),3))
 
-print("\n===== WALK-FORWARD RESULTS =====\n")
-print("Market Sharpe:", round(sharpe(market_returns),3))
-print("Strategy Sharpe:", round(sharpe(strategy_returns),3))
-print("Market Max DD:", round(max_dd(cum_market),3))
-print("Strategy Max DD:", round(max_dd(cum_strategy),3))
-print("Strategy Exposure:", round(strategy_returns.ne(0).mean(),3))
+print("Market Max DD:", round((df_test["Cumulative_Market"]/df_test["Cumulative_Market"].cummax()-1).min(),3))
+print("Strategy Max DD:", round((df_test["Cumulative_Strategy"]/df_test["Cumulative_Strategy"].cummax()-1).min(),3))
+
+# =========================
+# 7. Dash Dashboard
+# =========================
+
+app = dash.Dash(__name__)
+
+app.layout = html.Div([
+    html.H2("LSTM Return Prediction Strategy"),
+    dcc.Graph(
+        figure={
+            "data":[
+                go.Scatter(x=df_test.index, y=df_test["Cumulative_Market"], name="Market"),
+                go.Scatter(x=df_test.index, y=df_test["Cumulative_Strategy"], name="Strategy")
+            ],
+            "layout":go.Layout(title="Cumulative Returns")
+        }
+    )
+])
+
+if __name__ == "__main__":
+    app.run(debug=True)
