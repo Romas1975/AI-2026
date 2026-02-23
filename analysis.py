@@ -1,148 +1,100 @@
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from datetime import datetime
-from dash import Dash, dcc, html
-from dash.dependencies import Input, Output
-import plotly.graph_objs as go
-
-# LSTM imports
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
 from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+import dash
+from dash import html, dcc
+import plotly.graph_objects as go
 
-# =========================
-# 1. DATA FETCH
-# =========================
-symbol = "AAPL"
-start_date = "2022-01-01"
-end_date = datetime.today().strftime("%Y-%m-%d")
-df = yf.download(symbol, start=start_date, end=end_date)
-df.reset_index(inplace=True)
+# --- 1. Duomenų paruošimas ---
+ticker = "AAPL"
+df = yf.download(ticker, period="2y", interval="1d")
 
-# =========================
-# 2. MACD CALCULATION
-# =========================
-ema12 = df["Close"].ewm(span=12, adjust=False).mean()
-ema26 = df["Close"].ewm(span=26, adjust=False).mean()
-df["MACD"] = ema12 - ema26
-df["Signal_line"] = df["MACD"].ewm(span=9, adjust=False).mean()
-df["MACD_signal"] = np.where(df["MACD"] > df["Signal_line"], 1, 0)
+# Papildomi stulpeliai
+df["Return"] = df["Close"].pct_change()
+df["Vol_20"] = df["Return"].rolling(20).std() * np.sqrt(252)
 
-# =========================
-# 3. LSTM PREPARATION
-# =========================
+# --- 2. MACD signalas ---
+ema_fast = df["Close"].ewm(span=12, adjust=False).mean()
+ema_slow = df["Close"].ewm(span=26, adjust=False).mean()
+macd = ema_fast - ema_slow
+signal = macd.ewm(span=9, adjust=False).mean()
+df["MACD_signal"] = 0
+df.loc[macd > signal, "MACD_signal"] = 1
+df.loc[macd < signal, "MACD_signal"] = -1
+
+# --- 3. LSTM modelio paruošimas ---
 scaler = MinMaxScaler()
-scaled_close = scaler.fit_transform(df["Close"].values.reshape(-1,1))
+df["Close_scaled"] = scaler.fit_transform(df[["Close"]])
 
+# Sudarom X, y
+sequence_length = 10
 X, y = [], []
-look_back = 10
-for i in range(look_back, len(scaled_close)):
-    X.append(scaled_close[i-look_back:i, 0])
-    y.append(scaled_close[i, 0])
+for i in range(sequence_length, len(df)):
+    X.append(df["Close_scaled"].iloc[i-sequence_length:i].values)
+    y.append(df["Close_scaled"].iloc[i])
 X, y = np.array(X), np.array(y)
 X = X.reshape((X.shape[0], X.shape[1], 1))
 
-# LSTM MODEL
+# LSTM modelis
 model = Sequential()
-model.add(LSTM(50, return_sequences=True, input_shape=(X.shape[1],1)))
-model.add(Dropout(0.2))
-model.add(LSTM(50))
-model.add(Dropout(0.2))
+model.add(LSTM(50, input_shape=(X.shape[1], X.shape[2])))
 model.add(Dense(1))
-model.compile(optimizer='adam', loss='mean_squared_error')
-
+model.compile(optimizer="adam", loss="mse")
 model.fit(X, y, epochs=5, batch_size=32, verbose=1)
 
-# LSTM PREDICTION
+# --- 4. LSTM prognozės ---
 lstm_pred = model.predict(X)
-df = df.iloc[look_back:]
-df["LSTM_pred"] = scaler.inverse_transform(lstm_pred)
+lstm_pred_rescaled = scaler.inverse_transform(lstm_pred)
 
-# =========================
-# 4. DASHBOARD SETUP
-# =========================
-app = Dash(__name__)
+# Pridedam prie df (suderinant ilgį)
+df = df.iloc[sequence_length:]
+df["LSTM_pred"] = lstm_pred_rescaled
+
+# --- 5. LSTM signalai su alignment pataisa ---
+df["LSTM_pred_shifted"] = df["LSTM_pred"].shift(1)
+df["LSTM_signal"] = 0
+df.loc[df["LSTM_pred_shifted"] < df["Close"], "LSTM_signal"] = 1   # buy
+df.loc[df["LSTM_pred_shifted"] > df["Close"], "LSTM_signal"] = -1  # sell
+df.drop(columns=["LSTM_pred_shifted"], inplace=True)
+
+# --- 6. Statistikos apskaičiavimas ---
+strategy_returns = df["Return"] * df["LSTM_signal"].shift(1)
+total_market_return = df["Return"].sum()
+total_strategy_return = strategy_returns.sum()
+market_sharpe = df["Return"].mean() / df["Return"].std() * np.sqrt(252)
+strategy_sharpe = strategy_returns.mean() / strategy_returns.std() * np.sqrt(252)
+market_max_dd = (df["Close"] / df["Close"].cummax() - 1).min()
+strategy_max_dd = (strategy_returns.cumsum() / (strategy_returns.cumsum().cummax()) - 1).min()
+strategy_exposure = df["LSTM_signal"].abs().mean()
+buy_signals = (df["LSTM_signal"] == 1).sum()
+sell_signals = (df["LSTM_signal"] == -1).sum()
+
+print(f"Total Market Return: {total_market_return:.3f}")
+print(f"Total Strategy Return: {total_strategy_return:.3f}")
+print(f"Market Sharpe: {market_sharpe:.3f}")
+print(f"Strategy Sharpe: {strategy_sharpe:.3f}")
+print(f"Market Max Drawdown: {market_max_dd:.3f}")
+print(f"Strategy Max Drawdown: {strategy_max_dd:.3f}")
+print(f"Strategy Exposure (mean): {strategy_exposure:.3f}")
+print(f"Number of Buy signals: {buy_signals}")
+print(f"Number of Sell signals: {sell_signals}")
+
+# --- 7. Dash vizualizacija ---
+app = dash.Dash(__name__)
+
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=df.index, y=df["Close"], mode="lines", name="Close"))
+fig.add_trace(go.Scatter(x=df.index, y=df["LSTM_pred"], mode="lines", name="LSTM Pred"))
+fig.add_trace(go.Bar(x=df.index, y=df["LSTM_signal"], name="LSTM Signal"))
 
 app.layout = html.Div([
-    html.H1(f"{symbol} Dashboard: MACD + LSTM"),
-    
-    html.Div([
-        html.Label("Select feature:"),
-        dcc.Dropdown(
-            id='feature-dropdown',
-            options=[
-                {'label': 'Close', 'value': 'Close'},
-                {'label': 'MACD', 'value': 'MACD'},
-                {'label': 'Signal_line', 'value': 'Signal_line'},
-                {'label': 'LSTM Prediction', 'value': 'LSTM_pred'}
-            ],
-            value='Close'
-        )
-    ], style={'width':'50%'}),
-    
-    dcc.Graph(id='feature-graph'),
-    
-    html.Div(id='stats-output', style={'marginTop':20})
+    html.H1("Trading Dashboard"),
+    dcc.Graph(figure=fig)
 ])
 
-# =========================
-# 5. CALLBACKS
-# =========================
-@app.callback(
-    Output('feature-graph', 'figure'),
-    Output('stats-output', 'children'),
-    Input('feature-dropdown', 'value')
-)
-def update_graph(feature):
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=df['Date'],
-        y=df['Close'],
-        mode='lines',
-        name='Close'
-    ))
-    
-    if feature != 'Close':
-        fig.add_trace(go.Scatter(
-            x=df['Date'],
-            y=df[feature],
-            mode='lines',
-            name=feature
-        ))
-    
-    # STATISTICS
-    returns = df['Close'].pct_change().dropna()
-    strategy_returns = df['MACD_signal'].shift(1) * returns
-    total_market = round((1 + returns).prod() - 1, 3)
-    total_strategy = round((1 + strategy_returns).prod() - 1, 3)
-    market_sharpe = round(returns.mean()/returns.std()*np.sqrt(252), 3)
-    strategy_sharpe = round(strategy_returns.mean()/strategy_returns.std()*np.sqrt(252), 3)
-    max_dd_market = round((returns.cumsum() - returns.cumsum().cummax()).min(), 3)
-    max_dd_strategy = round((strategy_returns.cumsum() - strategy_returns.cumsum().cummax()).min(), 3)
-    exposure = round(df['MACD_signal'].mean(), 3)
-    buy_signals = int(df['MACD_signal'].sum())
-    sell_signals = int((df['MACD_signal'] == 0).sum())
-    
-    stats_text = f"""
-    Total Market Return: {total_market}
-    Total Strategy Return: {total_strategy}
-    
-    Market Sharpe: {market_sharpe}
-    Strategy Sharpe: {strategy_sharpe}
-    
-    Market Max Drawdown: {max_dd_market}
-    Strategy Max Drawdown: {max_dd_strategy}
-    
-    Strategy Exposure (mean): {exposure}
-    Number of Buy signals: {buy_signals}
-    Number of Sell signals: {sell_signals}
-    """
-    
-    return fig, stats_text
-
-# =========================
-# 6. RUN SERVER
-# =========================
+# Nauja Dash sintaksė
 if __name__ == "__main__":
     app.run(debug=True)
