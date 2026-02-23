@@ -1,144 +1,132 @@
-import numpy as np
-import pandas as pd
-import yfinance as yf
 import dash
-from dash import dcc, html
+from dash import dcc, html, Input, Output
 import plotly.graph_objs as go
+import pandas as pd
+import numpy as np
+import yfinance as yf
+
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, LSTM, Input
+from tensorflow.keras.layers import LSTM, Dense
 
-# =========================
-# 1️⃣ LOAD DATA
-# =========================
-
+# -----------------------------
+# 1️⃣ Load data
+# -----------------------------
 ticker = "SPY"
-df = yf.download(ticker, period="3y", auto_adjust=True)
+df = yf.download(ticker, period="1y", auto_adjust=True)
 
+# MultiIndex fix
 if isinstance(df.columns, pd.MultiIndex):
     df.columns = df.columns.get_level_values(0)
 
+# -----------------------------
+# 2️⃣ Features
+# -----------------------------
 df["Market_returns"] = df["Close"].pct_change()
+df["Vol_20"] = df["Market_returns"].rolling(20).std() * np.sqrt(252)
+
+# MACD
+ema12 = df["Close"].ewm(span=12).mean()
+ema26 = df["Close"].ewm(span=26).mean()
+df["MACD"] = ema12 - ema26
+df["Signal_line"] = df["MACD"].ewm(span=9).mean()
+
+df["AI_signal_MACD"] = np.where(df["MACD"] > df["Signal_line"], 1, 0)
 
 df.dropna(inplace=True)
 
-# =========================
-# 2️⃣ LSTM MODEL
-# =========================
+# -----------------------------
+# 3️⃣ LSTM Model for AI Signal
+# -----------------------------
+features = ["Close", "Market_returns", "Vol_20"]
+scaler = MinMaxScaler()
+scaled = scaler.fit_transform(df[features])
 
-scaler = MinMaxScaler(feature_range=(0,1))
-scaled_data = scaler.fit_transform(df[["Close"]])
-
-sequence_length = 30
-
-X = []
-y = []
-
-for i in range(sequence_length, len(scaled_data)):
-    X.append(scaled_data[i-sequence_length:i, 0])
-    y.append(scaled_data[i, 0])
-
+X, y = [], []
+seq_len = 5
+for i in range(seq_len, len(scaled)):
+    X.append(scaled[i-seq_len:i])
+    y.append(df["AI_signal_MACD"].iloc[i])
 X, y = np.array(X), np.array(y)
-X = np.reshape(X, (X.shape[0], X.shape[1], 1))
 
-model = Sequential([
-    Input(shape=(X.shape[1],1)),
-    LSTM(50, return_sequences=False),
-    Dense(1)
-])
-
-model.compile(optimizer="adam", loss="mse")
+model = Sequential()
+model.add(LSTM(32, input_shape=(X.shape[1], X.shape[2])))
+model.add(Dense(1, activation="sigmoid"))
+model.compile(optimizer="adam", loss="binary_crossentropy")
 model.fit(X, y, epochs=10, batch_size=16, verbose=0)
 
-predictions = model.predict(X, verbose=0)
-predictions = scaler.inverse_transform(predictions)
+preds = model.predict(X, verbose=0).flatten()
+df = df.iloc[seq_len:]
+df["AI_signal_LSTM"] = (preds > 0.5).astype(int)
 
-df = df.iloc[sequence_length:].copy()
-df["Predicted_Close"] = predictions.flatten()
-
-# =========================
-# 3️⃣ SIGNAL GENERATION
-# =========================
-
-df["AI_signal"] = np.where(df["Predicted_Close"] > df["Close"], 1, 0)
-
-# =========================
-# 4️⃣ RISK ENGINE
-# =========================
-
-target_vol = 0.15
-rolling_window = 20
-max_leverage = 2.0
-
-df["Rolling_vol"] = df["Market_returns"].rolling(rolling_window).std() * np.sqrt(252)
-df["Vol_position"] = target_vol / df["Rolling_vol"]
-df["Vol_position"] = df["Vol_position"].clip(upper=max_leverage)
-
-df["Final_position"] = df["AI_signal"] * df["Vol_position"]
-
-df["Strategy_returns"] = df["Final_position"] * df["Market_returns"]
-
-df.dropna(inplace=True)
-
-# =========================
-# 5️⃣ PERFORMANCE
-# =========================
-
+# Use LSTM signal as strategy
+df["Strategy_returns"] = df["Market_returns"] * df["AI_signal_LSTM"]
 df["Cumulative_market"] = (1 + df["Market_returns"]).cumprod()
 df["Cumulative_strategy"] = (1 + df["Strategy_returns"]).cumprod()
+df["Drawdown_market"] = df["Cumulative_market"]/df["Cumulative_market"].cummax() - 1
+df["Drawdown_strategy"] = df["Cumulative_strategy"]/df["Cumulative_strategy"].cummax() - 1
 
-df["Drawdown_market"] = df["Cumulative_market"] / df["Cumulative_market"].cummax() - 1
-df["Drawdown_strategy"] = df["Cumulative_strategy"] / df["Cumulative_strategy"].cummax() - 1
+# -----------------------------
+# 4️⃣ Metrics
+# -----------------------------
+def sharpe_ratio(r):
+    return np.sqrt(252) * r.mean() / r.std()
 
-def sharpe_ratio(returns):
-    return np.sqrt(252) * returns.mean() / returns.std()
+def max_drawdown(cum):
+    return (cum / cum.cummax() - 1).min()
 
-def max_drawdown(cumulative):
-    roll_max = cumulative.cummax()
-    return (cumulative / roll_max - 1).min()
+metrics = {
+    "Total Market Return": df["Cumulative_market"].iloc[-1] - 1,
+    "Total Strategy Return": df["Cumulative_strategy"].iloc[-1] - 1,
+    "Market Sharpe": sharpe_ratio(df["Market_returns"]),
+    "Strategy Sharpe": sharpe_ratio(df["Strategy_returns"]),
+    "Market Max Drawdown": max_drawdown(df["Cumulative_market"]),
+    "Strategy Max Drawdown": max_drawdown(df["Cumulative_strategy"]),
+    "Strategy Exposure (mean)": df["AI_signal_LSTM"].mean(),
+    "Buy signals": int(df["AI_signal_LSTM"].sum()),
+    "Sell signals": int(len(df) - df["AI_signal_LSTM"].sum())
+}
 
-print("Total Market Return:", round(df["Cumulative_market"].iloc[-1]-1,3))
-print("Total Strategy Return:", round(df["Cumulative_strategy"].iloc[-1]-1,3))
-print()
-print("Market Sharpe:", round(sharpe_ratio(df["Market_returns"]),3))
-print("Strategy Sharpe:", round(sharpe_ratio(df["Strategy_returns"]),3))
-print()
-print("Market Max Drawdown:", round(max_drawdown(df["Cumulative_market"]),3))
-print("Strategy Max Drawdown:", round(max_drawdown(df["Cumulative_strategy"]),3))
-print()
-print("Strategy Exposure (mean):", round(df["Final_position"].mean(),3))
-print("Max leverage used:", round(df["Final_position"].max(),3))
-print("Number of Buy signals:", int(df["AI_signal"].sum()))
-print("Number of Sell signals:", int((df["AI_signal"]==0).sum()))
-
-# =========================
-# 6️⃣ DASHBOARD
-# =========================
-
+# -----------------------------
+# 5️⃣ Dash App
+# -----------------------------
 app = dash.Dash(__name__)
-app.title = "LSTM AI Strategy"
+app.title = "LSTM AI Strategy Dashboard"
 
 app.layout = html.Div([
-    html.H1("LSTM AI Strategy with Risk Engine", style={'textAlign':'center'}),
-    dcc.Graph(
-        figure={
-            "data":[
-                go.Scatter(x=df.index, y=df["Cumulative_market"], name="Buy & Hold"),
-                go.Scatter(x=df.index, y=df["Cumulative_strategy"], name="AI Strategy")
-            ],
-            "layout":go.Layout(title="Cumulative Returns")
-        }
+    html.H1("LSTM AI Strategy vs Market", style={"textAlign":"center"}),
+    dcc.DatePickerRange(
+        id="date-range",
+        start_date=df.index.min(),
+        end_date=df.index.max(),
+        min_date_allowed=df.index.min(),
+        max_date_allowed=df.index.max()
     ),
-    dcc.Graph(
-        figure={
-            "data":[
-                go.Scatter(x=df.index, y=df["Drawdown_market"], name="Market DD"),
-                go.Scatter(x=df.index, y=df["Drawdown_strategy"], name="Strategy DD")
-            ],
-            "layout":go.Layout(title="Drawdowns")
-        }
-    )
+    dcc.Graph(id="cum_returns"),
+    dcc.Graph(id="drawdowns"),
+    html.Div(id="metrics", style={"textAlign":"center", "fontSize":16})
 ])
+
+@app.callback(
+    Output("cum_returns","figure"),
+    Output("drawdowns","figure"),
+    Output("metrics","children"),
+    Input("date-range","start_date"),
+    Input("date-range","end_date")
+)
+def update_dashboard(start_date, end_date):
+    dff = df.loc[start_date:end_date]
+
+    fig_cum = go.Figure()
+    fig_cum.add_trace(go.Scatter(x=dff.index, y=dff["Cumulative_market"], name="Buy & Hold"))
+    fig_cum.add_trace(go.Scatter(x=dff.index, y=dff["Cumulative_strategy"], name="AI Strategy"))
+
+    fig_dd = go.Figure()
+    fig_dd.add_trace(go.Scatter(x=dff.index, y=dff["Drawdown_market"], name="Market Drawdown"))
+    fig_dd.add_trace(go.Scatter(x=dff.index, y=dff["Drawdown_strategy"], name="Strategy Drawdown"))
+
+    metrics_text = [html.P(f"{k}: {round(v,3)}") for k,v in metrics.items()]
+    return fig_cum, fig_dd, metrics_text
 
 if __name__ == "__main__":
     app.run(debug=True)
