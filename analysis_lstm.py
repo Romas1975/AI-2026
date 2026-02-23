@@ -1,132 +1,122 @@
-import dash
-from dash import dcc, html, Input, Output
-import plotly.graph_objs as go
 import pandas as pd
-import numpy as np
 import yfinance as yf
-
+import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
+import dash
+from dash import dcc, html
+import plotly.graph_objs as go
 
-# -----------------------------
-# 1️⃣ Load data
-# -----------------------------
-ticker = "SPY"
-df = yf.download(ticker, period="1y", auto_adjust=True)
+# --- 1. Duomenų parsisiuntimas ---
+def load_data(symbol, start_date, end_date):
+    df = yf.download(symbol, start=start_date, end=end_date)
+    if isinstance(df.index, pd.MultiIndex):
+        df = df.reset_index(level=df.index.names.difference(['Date']), drop=True)
+    return df[['Close']].copy()
 
-# MultiIndex fix
-if isinstance(df.columns, pd.MultiIndex):
-    df.columns = df.columns.get_level_values(0)
+symbol = "AAPL"
+df = load_data(symbol, start_date="2022-01-01", end_date="2026-01-01")
 
-# -----------------------------
-# 2️⃣ Features
-# -----------------------------
-df["Market_returns"] = df["Close"].pct_change()
-df["Vol_20"] = df["Market_returns"].rolling(20).std() * np.sqrt(252)
+# --- 2. MACD skaičiavimas ---
+def calculate_macd(df):
+    ema_fast = df["Close"].ewm(span=12, adjust=False).mean()
+    ema_slow = df["Close"].ewm(span=26, adjust=False).mean()
+    macd = ema_fast - ema_slow
+    signal = macd.ewm(span=9, adjust=False).mean()
+    return macd, signal
 
-# MACD
-ema12 = df["Close"].ewm(span=12).mean()
-ema26 = df["Close"].ewm(span=26).mean()
-df["MACD"] = ema12 - ema26
-df["Signal_line"] = df["MACD"].ewm(span=9).mean()
+macd, signal = calculate_macd(df)
 
-df["AI_signal_MACD"] = np.where(df["MACD"] > df["Signal_line"], 1, 0)
+# --- 3. MACD signalų generavimas ---
+df["MACD_signal"] = np.where(macd > signal, 1, np.where(macd < signal, -1, 0))
 
-df.dropna(inplace=True)
+# --- 4. LSTM duomenų paruošimas ---
+def prepare_lstm_data(df, look_back=10):
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    scaled_data = scaler.fit_transform(df[["Close"]].values)
 
-# -----------------------------
-# 3️⃣ LSTM Model for AI Signal
-# -----------------------------
-features = ["Close", "Market_returns", "Vol_20"]
-scaler = MinMaxScaler()
-scaled = scaler.fit_transform(df[features])
+    def create_dataset(data, look_back):
+        X, y = [], []
+        for i in range(look_back, len(data)):
+            X.append(data[i-look_back:i, 0])
+            y.append(data[i, 0])
+        return np.array(X), np.array(y)
 
-X, y = [], []
-seq_len = 5
-for i in range(seq_len, len(scaled)):
-    X.append(scaled[i-seq_len:i])
-    y.append(df["AI_signal_MACD"].iloc[i])
-X, y = np.array(X), np.array(y)
+    X, y = create_dataset(scaled_data, look_back)
+    X = X.reshape(X.shape[0], X.shape[1], 1)
+    return X, y, scaler
 
-model = Sequential()
-model.add(LSTM(32, input_shape=(X.shape[1], X.shape[2])))
-model.add(Dense(1, activation="sigmoid"))
-model.compile(optimizer="adam", loss="binary_crossentropy")
-model.fit(X, y, epochs=10, batch_size=16, verbose=0)
+X, y, scaler = prepare_lstm_data(df, look_back=10)
 
-preds = model.predict(X, verbose=0).flatten()
-df = df.iloc[seq_len:]
-df["AI_signal_LSTM"] = (preds > 0.5).astype(int)
+# --- 5. LSTM modelio apmokymas ---
+def train_lstm(X, y):
+    model = Sequential()
+    model.add(LSTM(50, return_sequences=True, input_shape=(X.shape[1], 1)))
+    model.add(LSTM(50))
+    model.add(Dense(1))
+    model.compile(optimizer='adam', loss='mean_squared_error')
+    model.fit(X, y, epochs=10, batch_size=32, verbose=1)
+    return model
 
-# Use LSTM signal as strategy
-df["Strategy_returns"] = df["Market_returns"] * df["AI_signal_LSTM"]
-df["Cumulative_market"] = (1 + df["Market_returns"]).cumprod()
-df["Cumulative_strategy"] = (1 + df["Strategy_returns"]).cumprod()
-df["Drawdown_market"] = df["Cumulative_market"]/df["Cumulative_market"].cummax() - 1
-df["Drawdown_strategy"] = df["Cumulative_strategy"]/df["Cumulative_strategy"].cummax() - 1
+model = train_lstm(X, y)
 
-# -----------------------------
-# 4️⃣ Metrics
-# -----------------------------
-def sharpe_ratio(r):
-    return np.sqrt(252) * r.mean() / r.std()
+# --- 6. LSTM prognozių generavimas ---
+predicted = model.predict(X)
+df_lstm = df.iloc[10:].copy()
+df_lstm["LSTM_pred"] = scaler.inverse_transform(predicted).flatten()
 
-def max_drawdown(cum):
-    return (cum / cum.cummax() - 1).min()
+# --- 7. LSTM signalų generavimas ---
+lstm_pred_aligned, close_aligned = df_lstm["LSTM_pred"].align(df_lstm["Close"], axis=0, copy=False)
 
-metrics = {
-    "Total Market Return": df["Cumulative_market"].iloc[-1] - 1,
-    "Total Strategy Return": df["Cumulative_strategy"].iloc[-1] - 1,
-    "Market Sharpe": sharpe_ratio(df["Market_returns"]),
-    "Strategy Sharpe": sharpe_ratio(df["Strategy_returns"]),
-    "Market Max Drawdown": max_drawdown(df["Cumulative_market"]),
-    "Strategy Max Drawdown": max_drawdown(df["Cumulative_strategy"]),
-    "Strategy Exposure (mean)": df["AI_signal_LSTM"].mean(),
-    "Buy signals": int(df["AI_signal_LSTM"].sum()),
-    "Sell signals": int(len(df) - df["AI_signal_LSTM"].sum())
-}
+# Išmetame pirmą eilutę, kuri tampa NaN po shift(1)
+lstm_pred_shifted = lstm_pred_aligned.iloc[1:].reset_index(drop=True)
+close_shifted = close_aligned.iloc[1:].reset_index(drop=True)
 
-# -----------------------------
-# 5️⃣ Dash App
-# -----------------------------
+# Generuojame signalus
+df_lstm["LSTM_signal"] = 0
+df_lstm.iloc[1:].loc[lstm_pred_shifted < close_shifted, "LSTM_signal"] = 1
+df_lstm.iloc[1:].loc[lstm_pred_shifted > close_shifted, "LSTM_signal"] = -1
+
+# --- 8. Dash interaktyvi priemonė ---
 app = dash.Dash(__name__)
-app.title = "LSTM AI Strategy Dashboard"
 
 app.layout = html.Div([
-    html.H1("LSTM AI Strategy vs Market", style={"textAlign":"center"}),
-    dcc.DatePickerRange(
-        id="date-range",
-        start_date=df.index.min(),
-        end_date=df.index.max(),
-        min_date_allowed=df.index.min(),
-        max_date_allowed=df.index.max()
+    html.H1(f"{symbol} MACD & LSTM Analizė"),
+    dcc.Graph(
+        id="price-chart",
+        figure={
+            "data": [
+                {"x": df_lstm.index, "y": df_lstm["Close"], "type": "line", "name": "Uždarymo kaina"},
+                {"x": df_lstm.index, "y": df_lstm["LSTM_pred"], "type": "line", "name": "LSTM prognozė"},
+            ],
+            "layout": {"title": f"{symbol} Kainos ir LSTM prognozės"}
+        }
     ),
-    dcc.Graph(id="cum_returns"),
-    dcc.Graph(id="drawdowns"),
-    html.Div(id="metrics", style={"textAlign":"center", "fontSize":16})
+    dcc.Graph(
+        id="macd-chart",
+        figure={
+            "data": [
+                {"x": df.index, "y": macd, "type": "line", "name": "MACD"},
+                {"x": df.index, "y": signal, "type": "line", "name": "Signalas"},
+            ],
+            "layout": {"title": "MACD ir Signalas"}
+        }
+    ),
+    dcc.Graph(
+        id="signals-chart",
+        figure={
+            "data": [
+                {"x": df_lstm.index[1:], "y": df_lstm["MACD_signal"].iloc[1:], "type": "scatter", "mode": "markers", "name": "MACD signalai", "marker": {"color": "blue"}},
+                {"x": df_lstm.index[1:], "y": df_lstm["LSTM_signal"].iloc[1:], "type": "scatter", "mode": "markers", "name": "LSTM signalai", "marker": {"color": "red"}},
+            ],
+            "layout": {"title": "Prekybos signalai (MACD ir LSTM)"}
+        }
+    )
 ])
 
-@app.callback(
-    Output("cum_returns","figure"),
-    Output("drawdowns","figure"),
-    Output("metrics","children"),
-    Input("date-range","start_date"),
-    Input("date-range","end_date")
-)
-def update_dashboard(start_date, end_date):
-    dff = df.loc[start_date:end_date]
-
-    fig_cum = go.Figure()
-    fig_cum.add_trace(go.Scatter(x=dff.index, y=dff["Cumulative_market"], name="Buy & Hold"))
-    fig_cum.add_trace(go.Scatter(x=dff.index, y=dff["Cumulative_strategy"], name="AI Strategy"))
-
-    fig_dd = go.Figure()
-    fig_dd.add_trace(go.Scatter(x=dff.index, y=dff["Drawdown_market"], name="Market Drawdown"))
-    fig_dd.add_trace(go.Scatter(x=dff.index, y=dff["Drawdown_strategy"], name="Strategy Drawdown"))
-
-    metrics_text = [html.P(f"{k}: {round(v,3)}") for k,v in metrics.items()]
-    return fig_cum, fig_dd, metrics_text
-
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run_server(debug=True, port=8050)
+
+print(df_lstm.shape)
+print(predicted.shape)
